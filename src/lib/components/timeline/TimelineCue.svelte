@@ -14,6 +14,32 @@
     let width = $derived(((cue.endMs - cue.startMs) / 1000) * pixelsPerSecond);
     let isSelected = $derived(projectStore.selectedCueIds.has(cue.id));
 
+    let isDraggingView = $state(false);
+    let dragOffsetY = $state(0);
+
+    function getMagnetSnapPoints(excludeCurrentTrack = false): number[] {
+        const points: number[] = [0]; // Always snap to start
+        projectStore.project.tracks.forEach((t) => {
+            if (t.magnetEnabled && (!excludeCurrentTrack || t.id !== trackId)) {
+                t.cues.forEach((c) => {
+                    if (c.id !== cue.id) {
+                        points.push(c.startMs);
+                        points.push(c.endMs);
+                    }
+                });
+            }
+        });
+        return [...new Set(points)];
+    }
+
+    function snapValue(valueMs: number, points: number[]): number {
+        const thresholdMs = (10 / pixelsPerSecond) * 1000; // 10px threshold
+        for (const p of points) {
+            if (Math.abs(valueMs - p) < thresholdMs) return p;
+        }
+        return valueMs;
+    }
+
     function handleMouseDown(e: MouseEvent) {
         e.stopPropagation();
         // Select with reassignment for reactivity
@@ -32,25 +58,72 @@
 
         // Drag logic (Move)
         const startX = e.clientX;
+        const startY = e.clientY;
         const originalStart = cue.startMs;
         const originalEnd = cue.endMs;
+        const duration = originalEnd - originalStart;
+
+        const snapPoints = getMagnetSnapPoints();
+        let currentTrackId = trackId;
 
         const onMouseMove = (moveEvent: MouseEvent) => {
+            isDraggingView = true;
             const deltaX = moveEvent.clientX - startX;
-            const deltaMs = (deltaX / pixelsPerSecond) * 1000;
+            const deltaY = moveEvent.clientY - startY;
+
+            dragOffsetY = deltaY;
+
+            let newStart = originalStart + (deltaX / pixelsPerSecond) * 1000;
+            newStart = Math.max(0, newStart);
+
+            // Snap start or end
+            const snapPoints = getMagnetSnapPoints();
+            const snappedStart = snapValue(newStart, snapPoints);
+            const snappedEnd = snapValue(newStart + duration, snapPoints);
+
+            if (snappedStart !== newStart) {
+                newStart = snappedStart;
+            } else if (snappedEnd !== newStart + duration) {
+                newStart = snappedEnd - duration;
+            }
+
+            const newEnd = newStart + duration;
+
+            // Track switching logic
+            const tracksContainer = document.querySelector(".tracks-container");
+            if (tracksContainer) {
+                const rect = tracksContainer.getBoundingClientRect();
+                const relativeY = moveEvent.clientY - rect.top;
+
+                let accumulatedHeight = 0;
+                let foundTrackId = trackId;
+                for (const t of projectStore.project.tracks) {
+                    accumulatedHeight += t.height;
+                    if (relativeY < accumulatedHeight) {
+                        foundTrackId = t.id;
+                        break;
+                    }
+                }
+                currentTrackId = foundTrackId;
+            }
 
             projectStore.updateCue(trackId, cue.id, {
-                startMs: Math.max(0, originalStart + deltaMs),
-                endMs: Math.max(0, originalEnd + deltaMs),
+                startMs: newStart,
+                endMs: newEnd,
             });
         };
 
         const onMouseUp = () => {
+            isDraggingView = false;
+            dragOffsetY = 0;
             window.removeEventListener("mousemove", onMouseMove);
             window.removeEventListener("mouseup", onMouseUp);
 
-            // Commit change to CommandHistory
-            if (cue.startMs !== originalStart || cue.endMs !== originalEnd) {
+            if (
+                cue.startMs !== originalStart ||
+                cue.endMs !== originalEnd ||
+                currentTrackId !== trackId
+            ) {
                 commandManager.execute(
                     new MoveCueCommand(
                         trackId,
@@ -59,6 +132,7 @@
                         originalEnd,
                         cue.startMs,
                         cue.endMs,
+                        currentTrackId,
                     ),
                 );
             }
@@ -75,22 +149,21 @@
         const startX = e.clientX;
         const originalStart = cue.startMs;
         const originalEnd = cue.endMs;
+        const snapPoints = getMagnetSnapPoints();
 
         const onMouseMove = (moveEvent: MouseEvent) => {
             const deltaX = moveEvent.clientX - startX;
             const deltaMs = (deltaX / pixelsPerSecond) * 1000;
 
             if (edge === "start") {
-                const newStart = Math.min(
-                    originalEnd - 100,
-                    Math.max(0, originalStart + deltaMs),
-                );
+                let newStart = Math.max(0, originalStart + deltaMs);
+                newStart = Math.min(originalEnd - 100, newStart);
+                newStart = snapValue(newStart, snapPoints);
                 projectStore.updateCue(trackId, cue.id, { startMs: newStart });
             } else {
-                const newEnd = Math.max(
-                    originalStart + 100,
-                    originalEnd + deltaMs,
-                );
+                let newEnd = originalEnd + deltaMs;
+                newEnd = Math.max(originalStart + 100, newEnd);
+                newEnd = snapValue(newEnd, snapPoints);
                 projectStore.updateCue(trackId, cue.id, { endMs: newEnd });
             }
         };
@@ -161,7 +234,8 @@
 <div
     class="cue"
     class:selected={isSelected}
-    style="left: {left}px; width: {width}px;"
+    style="left: {left}px; width: {width}px; transform: translateY({dragOffsetY}px);"
+    class:dragging={isDraggingView}
     onmousedown={handleMouseDown}
     role="button"
     tabindex="0"
@@ -202,6 +276,12 @@
         background: var(--selection-bg);
         border-color: var(--selection-border);
         z-index: 10;
+    }
+    .cue.dragging {
+        z-index: 100;
+        opacity: 0.8;
+        pointer-events: none; /* Let track detection work under it more easily if needed */
+        cursor: grabbing;
     }
     .content {
         padding: 0 6px;

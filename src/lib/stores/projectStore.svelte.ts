@@ -65,7 +65,9 @@ export class ProjectStore {
             trackEffects: [],
             height: 40,
             cues: [],
-            animTracks: []
+            animTracks: [],
+            excludeFromExport: false,
+            magnetEnabled: false
         };
         this.project.tracks.push(track);
         this.selectedTrackId = track.id;
@@ -96,6 +98,10 @@ export class ProjectStore {
     restoreCue(trackId: string, cue: Cue) {
         const track = this.project.tracks.find(t => t.id === trackId);
         if (!track) return;
+
+        // Double check it's not already there
+        if (track.cues.some(c => c.id === cue.id)) return;
+
         track.cues.push(cue);
         track.cues.sort((a, b) => a.startMs - b.startMs);
         this.project.updatedAt = new Date().toISOString();
@@ -222,6 +228,27 @@ export class ProjectStore {
             this.selectedTrackId = null;
         }
         this.project.updatedAt = new Date().toISOString();
+    }
+
+    addTrackAt(track: Track, index: number) {
+        this.project.tracks.splice(index, 0, track);
+        this.project.updatedAt = new Date().toISOString();
+    }
+
+    toggleTrackExport(trackId: string) {
+        const track = this.project.tracks.find(t => t.id === trackId);
+        if (track) {
+            track.excludeFromExport = !track.excludeFromExport;
+            this.project.updatedAt = new Date().toISOString();
+        }
+    }
+
+    toggleMagnet(trackId: string) {
+        const track = this.project.tracks.find(t => t.id === trackId);
+        if (track) {
+            track.magnetEnabled = !track.magnetEnabled;
+            this.project.updatedAt = new Date().toISOString();
+        }
     }
 
     updateTrackStyle(trackId: string, style: Partial<StyleProps>) {

@@ -10,7 +10,6 @@
         Math.max(projectStore.project?.media.durationMs || 0, 60000) + 10000,
     );
     let width = $derived((duration / 1000) * pixelsPerSecond);
-
     let playheadLeft = $derived(
         (projectStore.currentTime / 1000) * pixelsPerSecond,
     );
@@ -48,11 +47,28 @@
     function handleWheel(e: WheelEvent) {
         if (e.ctrlKey) {
             e.preventDefault();
+
+            // Store playhead position relative to screen before zoom
+            const playheadScreenPos = playheadLeft - scrollContainer.scrollLeft;
+
             const factor = e.deltaY > 0 ? 0.9 : 1.1;
-            pixelsPerSecond = Math.max(
+            const newPixelsPerSecond = Math.max(
                 10,
                 Math.min(500, pixelsPerSecond * factor),
             );
+
+            if (newPixelsPerSecond !== pixelsPerSecond) {
+                pixelsPerSecond = newPixelsPerSecond;
+
+                // After zoom, update scrollLeft to keep playhead at the same screen position
+                // Use setTimeout to wait for $derived to update playheadLeft
+                setTimeout(() => {
+                    if (scrollContainer) {
+                        scrollContainer.scrollLeft =
+                            playheadLeft - playheadScreenPos;
+                    }
+                }, 0);
+            }
         }
     }
 
@@ -88,80 +104,83 @@
 </script>
 
 <div class="timeline-wrapper">
-    <div class="toolbar">
-        <label title="Zoom">
-            Zoom:
-            <input
-                type="range"
-                min="10"
-                max="500"
-                step="10"
-                bind:value={pixelsPerSecond}
-                style="width: 100px;"
-            />
-        </label>
-        <span>{pixelsPerSecond.toFixed(0)} px/s</span>
-        <span
-            style="margin-left: auto; color: var(--text-muted); font-size: 0.7rem;"
-        >
-            {formatTimeLabel(Math.floor(projectStore.currentTime / 1000))}
-        </span>
-    </div>
-
-    <div
-        class="scroll-container"
-        bind:this={scrollContainer}
-        onwheel={handleWheel}
-    >
-        <div class="content" style="width: {width}px;">
-            <!-- Ruler with scrubbing -->
-            <div
-                class="ruler"
-                class:scrubbing={isScrubbing}
-                onmousedown={handleRulerMouseDown}
-                role="slider"
-                tabindex="0"
-                aria-valuenow={projectStore.currentTime}
-                onkeydown={(e) => {
-                    if (e.key === "ArrowRight")
-                        projectStore.setTime(projectStore.currentTime + 100);
-                    if (e.key === "ArrowLeft")
-                        projectStore.setTime(
-                            Math.max(0, projectStore.currentTime - 100),
-                        );
-                }}
-            >
-                <!-- Minor ticks -->
-                {#each { length: Math.ceil(duration / 1000 / minorTickInterval) } as _, i}
-                    {@const tSec = i * minorTickInterval}
-                    {#if tSec % tickInterval !== 0}
-                        <div
-                            class="tick minor"
-                            style="left: {tSec * pixelsPerSecond}px;"
-                        ></div>
-                    {/if}
-                {/each}
-                <!-- Major ticks with labels -->
-                {#each { length: Math.ceil(duration / 1000 / tickInterval) } as _, i}
-                    {@const tSec = i * tickInterval}
-                    <div
-                        class="tick major"
-                        style="left: {tSec * pixelsPerSecond}px;"
-                    >
-                        <span class="label">{formatTimeLabel(tSec)}</span>
-                    </div>
-                {/each}
+    <div class="timeline-grid">
+        <!-- Left column: Track Headers (Vertical scroll sync) -->
+        <div class="headers-wrapper">
+            <div class="ruler-corner"></div>
+            <div class="headers-content" id="headers-scroller">
+                {#if projectStore.project}
+                    {#each projectStore.project.tracks as track (track.id)}
+                        <TimelineTrack
+                            {track}
+                            {pixelsPerSecond}
+                            mode="header"
+                        />
+                    {/each}
+                {/if}
             </div>
+        </div>
 
-            <!-- Tracks -->
-            {#if projectStore.project}
-                {#each projectStore.project.tracks as track (track.id)}
-                    <TimelineTrack {track} {pixelsPerSecond} />
-                {/each}
-            {/if}
+        <!-- Right column: Time Ruler (Horizontal scroll) and Track Cues (Both) -->
+        <div
+            class="scroll-container"
+            bind:this={scrollContainer}
+            onwheel={handleWheel}
+            onscroll={(e) => {
+                const head = document.getElementById("headers-scroller");
+                if (head) {
+                    head.scrollTop = e.currentTarget.scrollTop;
+                }
+            }}
+        >
+            <div class="content-width" style="width: {width}px;">
+                <!-- Ruler -->
+                <div
+                    class="ruler"
+                    class:scrubbing={isScrubbing}
+                    onmousedown={handleRulerMouseDown}
+                    role="slider"
+                    tabindex="0"
+                    aria-valuenow={projectStore.currentTime}
+                >
+                    <!-- Minor ticks -->
+                    {#each { length: Math.ceil(duration / 1000 / minorTickInterval) } as _, i}
+                        {@const tSec = i * minorTickInterval}
+                        {#if tSec % tickInterval !== 0}
+                            <div
+                                class="tick minor"
+                                style="left: {tSec * pixelsPerSecond}px;"
+                            ></div>
+                        {/if}
+                    {/each}
+                    <!-- Major ticks -->
+                    {#each { length: Math.ceil(duration / 1000 / tickInterval) } as _, i}
+                        {@const tSec = i * tickInterval}
+                        <div
+                            class="tick major"
+                            style="left: {tSec * pixelsPerSecond}px;"
+                        >
+                            <span class="label">{formatTimeLabel(tSec)}</span>
+                        </div>
+                    {/each}
+                </div>
 
-            <!-- Playhead -->
-            <div class="playhead" style="left: {playheadLeft}px;"></div>
+                <!-- Tracks content -->
+                {#if projectStore.project}
+                    <div class="tracks-container">
+                        {#each projectStore.project.tracks as track (track.id)}
+                            <TimelineTrack
+                                {track}
+                                {pixelsPerSecond}
+                                mode="content"
+                            />
+                        {/each}
+                    </div>
+                {/if}
+
+                <!-- Playhead -->
+                <div class="playhead" style="left: {playheadLeft}px;"></div>
+            </div>
         </div>
     </div>
 </div>
@@ -175,51 +194,83 @@
         background: var(--bg-dark);
         overflow: hidden;
     }
-    .toolbar {
-        height: 28px;
-        background: var(--bg-header);
-        border-bottom: 1px solid var(--border-dark);
-        display: flex;
-        align-items: center;
-        padding: 0 0.5rem;
-        font-size: 0.75rem;
-        color: var(--text-dim);
-        gap: 0.5rem;
+
+    .timeline-grid {
+        flex: 1;
+        display: grid;
+        grid-template-columns: 150px 1fr;
+        height: 100%;
+        overflow: hidden;
     }
+
+    .headers-wrapper {
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        background: var(--bg-panel);
+        border-right: 1px solid var(--border-dark);
+        z-index: 20;
+    }
+
+    .headers-content {
+        flex: 1;
+        overflow-y: hidden; /* Scrolled by sync */
+    }
+
+    .ruler-corner {
+        height: 24px;
+        background: var(--bg-panel);
+        border-bottom: 1px solid var(--border-light);
+    }
+
     .scroll-container {
         flex: 1;
         overflow: auto;
         position: relative;
     }
-    .content {
-        min-height: 100%;
+
+    .content-width {
         position: relative;
+        min-height: 100%;
     }
+
+    .tracks-container {
+        position: relative;
+        width: 100%;
+    }
+
     .ruler {
         height: 24px;
         background: var(--timeline-ruler-bg);
         border-bottom: 1px solid var(--border-light);
-        position: relative;
+        position: sticky;
+        top: 0;
+        z-index: 10;
         cursor: pointer;
         user-select: none;
     }
+
     .ruler.scrubbing {
         cursor: ew-resize;
     }
+
     .tick {
         position: absolute;
         bottom: 0;
     }
+
     .tick.major {
         width: 1px;
         height: 10px;
         background: var(--text-muted);
     }
+
     .tick.minor {
         width: 1px;
         height: 5px;
         background: var(--border-light);
     }
+
     .tick .label {
         position: absolute;
         top: -14px;
@@ -229,6 +280,7 @@
         pointer-events: none;
         white-space: nowrap;
     }
+
     .playhead {
         position: absolute;
         top: 0;
@@ -236,8 +288,9 @@
         width: 1px;
         background: var(--timeline-playhead);
         pointer-events: none;
-        z-index: 50;
+        z-index: 15;
     }
+
     .playhead::before {
         content: "";
         position: absolute;

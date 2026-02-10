@@ -37,6 +37,8 @@ export interface Track {
   height: number;
   cues: Cue[];
   animTracks: KeyframeTrack<any>[];
+  excludeFromExport: boolean;
+  magnetEnabled: boolean;
 }
 
 export interface TrackTransform {

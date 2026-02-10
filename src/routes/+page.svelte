@@ -16,14 +16,18 @@
         RemoveCueCommand,
         AddCueCommand,
     } from "$lib/engine/command.svelte";
-    import { Plus, Trash2 } from "lucide-svelte";
+    import { Plus, Trash2, Settings } from "lucide-svelte";
+    import { t } from "$lib/utils/i18n";
+    import { settingsStore } from "$lib/stores/settingsStore.svelte";
+    import { type Cue as CueType } from "$lib/types";
 
-    // Clipboard for copy-paste of cue style/position
-    let copiedCueData: {
-        posOverride?: any;
-        styleOverride?: any;
-        effects?: any[];
-    } | null = null;
+    // Clipboard for full cue duplication
+    let copiedCues = $state<
+        {
+            cue: CueType;
+            relativeStartMs: number;
+        }[]
+    >([]);
 
     async function handleSave() {
         await saveProject(false, $state.snapshot(projectStore.project));
@@ -54,64 +58,109 @@
             e.preventDefault();
             commandManager.redo();
         } else if (e.ctrlKey && e.key === "c") {
-            // Copy selected cue's style, position, effects
-            if (
-                projectStore.selectedTrackId &&
-                projectStore.selectedCueIds.size > 0
-            ) {
+            // Copy full selected cues
+            let trackId = projectStore.selectedTrackId;
+            // Fallback: finding which track has the selected cues
+            if (!trackId && projectStore.selectedCueIds.size > 0) {
+                const firstId = [...projectStore.selectedCueIds][0];
+                for (const t of projectStore.project.tracks) {
+                    if (t.cues.some((c) => c.id === firstId)) {
+                        trackId = t.id;
+                        break;
+                    }
+                }
+            }
+
+            if (trackId && projectStore.selectedCueIds.size > 0) {
+                e.preventDefault();
                 const track = projectStore.project.tracks.find(
-                    (t) => t.id === projectStore.selectedTrackId,
+                    (t) => t.id === trackId,
                 );
                 if (track) {
-                    const cueId = [...projectStore.selectedCueIds][0];
-                    const cue = track.cues.find((c) => c.id === cueId);
-                    if (cue) {
-                        copiedCueData = {
-                            posOverride: cue.posOverride
-                                ? JSON.parse(JSON.stringify(cue.posOverride))
-                                : undefined,
-                            styleOverride: cue.styleOverride
-                                ? JSON.parse(JSON.stringify(cue.styleOverride))
-                                : undefined,
-                            effects: cue.effects
-                                ? JSON.parse(JSON.stringify(cue.effects))
-                                : undefined,
-                        };
+                    const selected = track.cues.filter((c) =>
+                        projectStore.selectedCueIds.has(c.id),
+                    );
+                    if (selected.length > 0) {
+                        const minStart = Math.min(
+                            ...selected.map((c) => c.startMs),
+                        );
+                        // Use $state.snapshot to get a clean object
+                        copiedCues = selected.map((c) => ({
+                            cue: JSON.parse(JSON.stringify($state.snapshot(c))),
+                            relativeStartMs: c.startMs - minStart,
+                        }));
+                        console.log(
+                            "Cues copied to buffer:",
+                            copiedCues.length,
+                        );
                     }
                 }
             }
         } else if (e.ctrlKey && e.key === "v") {
-            // Paste copied style/position/effects to selected cue
-            if (
-                copiedCueData &&
-                projectStore.selectedTrackId &&
-                projectStore.selectedCueIds.size > 0
-            ) {
-                const track = projectStore.project.tracks.find(
-                    (t) => t.id === projectStore.selectedTrackId,
+            // Paste copied cues at playhead with overlap avoidance
+            if (copiedCues.length > 0) {
+                e.preventDefault();
+                const playheadMs = projectStore.currentTime;
+                let targetTrackId =
+                    projectStore.selectedTrackId ||
+                    projectStore.project.tracks[0]?.id;
+
+                if (!targetTrackId) return;
+
+                console.log(
+                    "Pasting",
+                    copiedCues.length,
+                    "cues at",
+                    playheadMs,
                 );
-                if (track) {
-                    for (const cueId of projectStore.selectedCueIds) {
-                        const cue = track.cues.find((c) => c.id === cueId);
-                        if (cue) {
-                            if (copiedCueData.posOverride) {
-                                cue.posOverride = JSON.parse(
-                                    JSON.stringify(copiedCueData.posOverride),
-                                );
-                            }
-                            if (copiedCueData.styleOverride) {
-                                cue.styleOverride = JSON.parse(
-                                    JSON.stringify(copiedCueData.styleOverride),
-                                );
-                            }
-                            if (copiedCueData.effects) {
-                                cue.effects = JSON.parse(
-                                    JSON.stringify(copiedCueData.effects),
-                                );
-                            }
+
+                for (const item of copiedCues) {
+                    const duration = item.cue.endMs - item.cue.startMs;
+                    const pasteStart = playheadMs + item.relativeStartMs;
+                    const pasteEnd = pasteStart + duration;
+
+                    // Find track without overlaps
+                    let finalTrackId = targetTrackId;
+                    let foundSafeTrack = false;
+
+                    // Try current and subsequent tracks
+                    const startIdx = projectStore.project.tracks.findIndex(
+                        (t) => t.id === targetTrackId,
+                    );
+                    for (
+                        let i = startIdx;
+                        i < projectStore.project.tracks.length;
+                        i++
+                    ) {
+                        const t = projectStore.project.tracks[i];
+                        const hasOverlap = t.cues.some(
+                            (c) => pasteStart < c.endMs && pasteEnd > c.startMs,
+                        );
+                        if (!hasOverlap) {
+                            finalTrackId = t.id;
+                            foundSafeTrack = true;
+                            break;
                         }
                     }
-                    projectStore.project.updatedAt = new Date().toISOString();
+
+                    if (!foundSafeTrack) {
+                        // Create new track
+                        projectStore.addTrack(`Pasted Track`);
+                        finalTrackId =
+                            projectStore.project.tracks[
+                                projectStore.project.tracks.length - 1
+                            ].id;
+                    }
+
+                    commandManager.execute(
+                        new AddCueCommand(
+                            finalTrackId,
+                            pasteStart,
+                            pasteEnd,
+                            item.cue.plainText,
+                            item.cue,
+                        ),
+                    );
                 }
             }
         } else if (e.key === "Delete") {
@@ -131,6 +180,8 @@
             }
         }
     }
+
+    let showOptionsPopup = $state(false);
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -140,25 +191,58 @@
         slot="toolbar"
         style="display: flex; gap: 0.5rem; align-items: center;"
     >
-        <button onclick={handleLoad}>Open</button>
+        <button onclick={handleLoad}>{t("open")}</button>
         <button
             onclick={() =>
                 saveProject(false, $state.snapshot(projectStore.project))}
-            >Save</button
+            >{t("save")}</button
         >
         <button
             onclick={() =>
                 saveProject(true, $state.snapshot(projectStore.project))}
-            >Save As...</button
+            >{t("saveAs")}</button
         >
+
+        <div style="position: relative;">
+            <button onclick={() => (showOptionsPopup = !showOptionsPopup)}>
+                <Settings size={14} style="vertical-align: middle;" />
+                {t("options")}
+            </button>
+
+            {#if showOptionsPopup}
+                <div class="options-popup">
+                    <div class="option-row">
+                        <label for="lang-select">{t("language")}</label>
+                        <select
+                            id="lang-select"
+                            bind:value={settingsStore.language}
+                        >
+                            <option value="ko">한국어</option>
+                            <option value="en">English</option>
+                        </select>
+                    </div>
+                    <div class="option-row">
+                        <label for="theme-select">{t("theme")}</label>
+                        <select
+                            id="theme-select"
+                            bind:value={settingsStore.theme}
+                        >
+                            <option value="dark">{t("dark")}</option>
+                            <option value="light">{t("light")}</option>
+                        </select>
+                    </div>
+                </div>
+            {/if}
+        </div>
+
         <div
             style="width: 1px; height: 20px; background: #444; margin: 0 0.5rem;"
         ></div>
         <button onclick={importSubtitle} title="Import SRT/ASS"
-            >Import Sub...</button
+            >{t("importSub")}</button
         >
         <button onclick={exportSubtitle} title="Export Selected Track"
-            >Export Sub...</button
+            >{t("exportSub")}</button
         >
         <div
             style="width: 1px; height: 20px; background: #444; margin: 0 0.5rem;"
@@ -196,7 +280,8 @@
             }}
             title="Add subtitle at playhead"
         >
-            <Plus size={14} style="vertical-align: middle;" /> Add Sub
+            <Plus size={14} style="vertical-align: middle;" />
+            {t("addSub")}
         </button>
         <button
             onclick={() => {
@@ -218,18 +303,19 @@
             disabled={projectStore.selectedCueIds.size === 0}
             title="Delete selected subtitle"
         >
-            <Trash2 size={14} style="vertical-align: middle;" /> Delete
+            <Trash2 size={14} style="vertical-align: middle;" />
+            {t("delete")}
         </button>
         <div
             style="width: 1px; height: 20px; background: #444; margin: 0 0.5rem;"
         ></div>
         <button
             onclick={() => commandManager.undo()}
-            disabled={!commandManager.canUndo()}>Undo</button
+            disabled={!commandManager.canUndo()}>{t("undo")}</button
         >
         <button
             onclick={() => commandManager.redo()}
-            disabled={!commandManager.canRedo()}>Redo</button
+            disabled={!commandManager.canRedo()}>{t("redo")}</button
         >
         <span style="margin-left: 1rem; color: #888;">
             {projectStore.project?.name ?? "No Project"}
@@ -264,11 +350,12 @@
                 style="padding: 0.5rem; background: #222; border-bottom: 1px solid #333; display: flex; justify-content: space-between;"
             >
                 <h3 style="margin: 0; font-size: 0.9rem; color: #ccc;">
-                    Tracks
+                    {t("tracks")}
                 </h3>
                 <button
                     onclick={() => projectStore.addTrack()}
-                    style="font-size: 0.8rem; padding: 2px 6px;">+ Track</button
+                    style="font-size: 0.8rem; padding: 2px 6px;"
+                    >{t("addTrack")}</button
                 >
             </div>
             <div style="flex: 1; overflow: hidden;">
@@ -294,5 +381,40 @@
         margin-top: 0;
         border-bottom: 1px solid #444;
         padding-bottom: 0.5rem;
+    }
+
+    .options-popup {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        background: var(--bg-panel);
+        border: 1px solid var(--border-light);
+        padding: 0.75rem;
+        z-index: 100;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        min-width: 150px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+        margin-top: 0.5rem;
+    }
+
+    .option-row {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+
+    .option-row label {
+        font-size: 0.8rem;
+        color: var(--text-dim);
+    }
+
+    select {
+        background: var(--bg-input);
+        color: var(--text-main);
+        border: 1px solid var(--border-light);
+        padding: 0.25rem;
+        font-size: 0.9rem;
     }
 </style>

@@ -63,19 +63,23 @@ export class AddCueCommand implements Command {
         private trackId: string,
         private startMs: number,
         private endMs: number,
-        private text: string
+        private text: string,
+        private fullCue?: Cue // Optional full cue for duplication/paste
     ) { }
 
     execute() {
         if (!this.createdCue) {
-            // First time execution, let store create it and return it?
-            // Or create it here and push to store?
-            // Store has the logic for ID generation and pushing.
-            // Better to let store handle logic, but we need to capture the created ID/Object for undo.
-            // Let's change store.addCue to return the new Cue.
-            this.createdCue = projectStore.addCue(this.trackId, this.startMs, this.endMs, this.text);
+            if (this.fullCue) {
+                // Use the provided full cue as a template
+                this.createdCue = JSON.parse(JSON.stringify(this.fullCue));
+                this.createdCue!.startMs = this.startMs;
+                this.createdCue!.endMs = this.endMs;
+                this.createdCue!.id = crypto.randomUUID(); // Always fresh ID for duplication
+                projectStore.restoreCue(this.trackId, this.createdCue!);
+            } else {
+                this.createdCue = projectStore.addCue(this.trackId, this.startMs, this.endMs, this.text);
+            }
         } else {
-            // Re-add existing cue (redo)
             projectStore.restoreCue(this.trackId, this.createdCue);
         }
     }
@@ -111,20 +115,49 @@ export class RemoveCueCommand implements Command {
 
 export class MoveCueCommand implements Command {
     constructor(
-        private trackId: string,
+        private oldTrackId: string,
         private cueId: string,
         private oldStart: number,
         private oldEnd: number,
         private newStart: number,
-        private newEnd: number
+        private newEnd: number,
+        private newTrackId: string = oldTrackId
     ) { }
 
     execute() {
-        projectStore.updateCue(this.trackId, this.cueId, { startMs: this.newStart, endMs: this.newEnd });
+        if (this.newTrackId !== this.oldTrackId) {
+            // Moving between tracks
+            const oldTrack = projectStore.project.tracks.find(t => t.id === this.oldTrackId);
+            const cue = oldTrack?.cues.find(c => c.id === this.cueId);
+            if (cue) {
+                const cueCopy = JSON.parse(JSON.stringify(cue));
+                cueCopy.startMs = this.newStart;
+                cueCopy.endMs = this.newEnd;
+                projectStore.removeCue(this.oldTrackId, this.cueId);
+                projectStore.restoreCue(this.newTrackId, cueCopy);
+                projectStore.selectedTrackId = this.newTrackId;
+            }
+        } else {
+            projectStore.updateCue(this.oldTrackId, this.cueId, { startMs: this.newStart, endMs: this.newEnd });
+        }
     }
 
     undo() {
-        projectStore.updateCue(this.trackId, this.cueId, { startMs: this.oldStart, endMs: this.oldEnd });
+        if (this.newTrackId !== this.oldTrackId) {
+            // Find it in the new track before removing it to get the most recent data
+            const newTrack = projectStore.project.tracks.find(t => t.id === this.newTrackId);
+            const cue = newTrack?.cues.find(c => c.id === this.cueId);
+            if (cue) {
+                const cueCopy = JSON.parse(JSON.stringify(cue));
+                cueCopy.startMs = this.oldStart;
+                cueCopy.endMs = this.oldEnd;
+                projectStore.removeCue(this.newTrackId, this.cueId);
+                projectStore.restoreCue(this.oldTrackId, cueCopy);
+                projectStore.selectedTrackId = this.oldTrackId;
+            }
+        } else {
+            projectStore.updateCue(this.oldTrackId, this.cueId, { startMs: this.oldStart, endMs: this.oldEnd });
+        }
     }
 }
 
@@ -626,5 +659,27 @@ export class UpdateKeyframeTimeCommand implements Command {
 
     undo() {
         projectStore.updateKeyframe(this.trackId, this.paramPath, this.newTMs, { tMs: this.oldTMs }, this.cueId);
+    }
+}
+
+export class RemoveTrackCommand implements Command {
+    private removedTrack: Track | null = null;
+    private removedIndex: number = -1;
+
+    constructor(private trackId: string) { }
+
+    execute() {
+        const idx = projectStore.project.tracks.findIndex(t => t.id === this.trackId);
+        if (idx !== -1) {
+            this.removedTrack = JSON.parse(JSON.stringify(projectStore.project.tracks[idx]));
+            this.removedIndex = idx;
+            projectStore.removeTrack(this.trackId);
+        }
+    }
+
+    undo() {
+        if (this.removedTrack && this.removedIndex !== -1) {
+            projectStore.addTrackAt(this.removedTrack, this.removedIndex);
+        }
     }
 }

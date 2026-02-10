@@ -33,6 +33,7 @@
         Plus,
         Settings,
         Trash2,
+        X,
     } from "lucide-svelte";
 
     let selectedData = $derived.by(() => {
@@ -225,6 +226,56 @@
 
     function closeStylePopup() {
         showStylePopup = false;
+        isStyleDocked = false;
+    }
+
+    let isStyleDocked = $state(false);
+    let popupPos = $state({ x: 100, y: 100 });
+    let isDraggingPopup = $state(false);
+    let dragOffset = { x: 0, y: 0 };
+    let isOverDockZone = $state(false);
+
+    function handlePopupMouseDown(e: MouseEvent) {
+        if (isStyleDocked) return;
+        isDraggingPopup = true;
+        dragOffset = {
+            x: e.clientX - popupPos.x,
+            y: e.clientY - popupPos.y,
+        };
+
+        window.addEventListener("mousemove", handlePopupMouseMove);
+        window.addEventListener("mouseup", handlePopupMouseUp);
+    }
+
+    function handlePopupMouseMove(e: MouseEvent) {
+        if (!isDraggingPopup) return;
+        popupPos = {
+            x: e.clientX - dragOffset.x,
+            y: e.clientY - dragOffset.y,
+        };
+
+        // Detect dock zone (Inspector tabs area)
+        const tabsEl = document.querySelector(".inspector .tabs");
+        if (tabsEl) {
+            const rect = tabsEl.getBoundingClientRect();
+            isOverDockZone =
+                e.clientX >= rect.left &&
+                e.clientX <= rect.right &&
+                e.clientY >= rect.top &&
+                e.clientY <= rect.bottom;
+        }
+    }
+
+    function handlePopupMouseUp() {
+        if (isOverDockZone) {
+            isStyleDocked = true;
+            showStylePopup = false;
+            activeTab = "style";
+        }
+        isDraggingPopup = false;
+        isOverDockZone = false;
+        window.removeEventListener("mousemove", handlePopupMouseMove);
+        window.removeEventListener("mouseup", handlePopupMouseUp);
     }
 
     function handleKeyframeTickMouseDown(e: MouseEvent, anim: any, kf: any) {
@@ -314,6 +365,26 @@
         >
             Effect
         </button>
+        {#if isStyleDocked}
+            <div class="tab-btn style-tab" class:active={activeTab === "style"}>
+                <button
+                    class="tab-inner-btn"
+                    onclick={() => (activeTab = "style")}
+                >
+                    Style
+                </button>
+                <button
+                    class="tab-close-btn"
+                    onclick={(e) => {
+                        e.stopPropagation();
+                        isStyleDocked = false;
+                        if (activeTab === "style") activeTab = "inspector";
+                    }}
+                >
+                    <X size={12} />
+                </button>
+            </div>
+        {/if}
     </div>
 
     {#if selectedData}
@@ -1032,25 +1103,21 @@
                         </div>
                     {/if}
                 </div>
-            {:else}
-                <!-- Effect Tab Content -->
-                <div class="row">
-                    <span class="label-text">Presets</span>
-                    <div class="presets-grid">
-                        <button class="preset-card" onclick={applyFadeIn}>
-                            <div class="preset-preview fade-in"></div>
-                            <span>Fade In</span>
-                        </button>
-                        <button class="preset-card" onclick={applyFadeOut}>
-                            <div class="preset-preview fade-out"></div>
-                            <span>Fade Out</span>
-                        </button>
+            {:else if activeTab === "style" && isStyleDocked}
+                <div class="style-dock-content">
+                    <div class="dock-header">
+                        <h3>
+                            Advanced Styling ({popupType === "track"
+                                ? "Track"
+                                : "Individual"})
+                        </h3>
                     </div>
-                </div>
-
-                <div class="row">
-                    <span class="label-text">Plugins (v0.1)</span>
-                    <div class="placeholder-box">No plugins installed.</div>
+                    <div class="style-controls-container">
+                        <section class="style-section-content">
+                            <!-- Style content will be rendered here via snippet or duplicated logic -->
+                            {@render styleContent()}
+                        </section>
+                    </div>
                 </div>
             {/if}
         </div>
@@ -1058,285 +1125,475 @@
         <div class="empty">Select a cue to edit properties.</div>
     {/if}
 
-    {#if showStylePopup && selectedData}
-        <div class="modal-overlay" onclick={closeStylePopup}>
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div class="style-popup" onclick={(e) => e.stopPropagation()}>
-                <h3>
-                    Advanced Styling ({popupType === "track"
-                        ? "Track"
-                        : "Individual"})
-                </h3>
-
-                <div class="popup-scroll">
-                    {#if popupType === "track"}
-                        {@const currentStyle = selectedData.track.defaultStyle}
-                        {@const updateFn = (s: any) =>
-                            commandManager.execute(
-                                new UpdateTrackStyleCommand(
-                                    selectedData.trackId,
-                                    s,
-                                ),
-                            )}
-                        <section>
-                            <h4>Text Color</h4>
-                            <div class="popup-row">
-                                <label>Color:</label>
-                                <input
-                                    type="color"
-                                    value={currentStyle.color || "#ffffff"}
-                                    onchange={(e) =>
-                                        updateFn({
-                                            color: (
-                                                e.target as HTMLInputElement
-                                            ).value,
-                                        })}
-                                />
-                            </div>
-                        </section>
-                        <section>
-                            <h4>Background</h4>
-                            <div class="popup-row">
-                                <label>Box:</label>
+    {#snippet styleContent()}
+        {#if popupType === "track"}
+            {@const currentStyle = selectedData.track.defaultStyle}
+            {@const updateFn = (s: any) =>
+                commandManager.execute(
+                    new UpdateTrackStyleCommand(selectedData.trackId, s),
+                )}
+            <section>
+                <h4>Text Color</h4>
+                <div class="popup-row">
+                    <label>Color:</label>
+                    <input
+                        type="color"
+                        value={currentStyle.color || "#ffffff"}
+                        onchange={(e) =>
+                            updateFn({
+                                color: (e.target as HTMLInputElement).value,
+                            })}
+                    />
+                </div>
+            </section>
+            <section>
+                <h4>Background</h4>
+                <div class="popup-row">
+                    <label>Box:</label>
+                    <input
+                        type="checkbox"
+                        checked={!!currentStyle.backgroundColor}
+                        onchange={(e) =>
+                            updateFn({
+                                backgroundColor: (e.target as HTMLInputElement)
+                                    .checked
+                                    ? "#000000"
+                                    : undefined,
+                            })}
+                    />
+                </div>
+                {#if currentStyle.backgroundColor}
+                    <div class="popup-row">
+                        <label>Color:</label>
+                        <input
+                            type="color"
+                            value={currentStyle.backgroundColor}
+                            onchange={(e) =>
+                                updateFn({
+                                    backgroundColor: (
+                                        e.target as HTMLInputElement
+                                    ).value,
+                                })}
+                        />
+                    </div>
+                    <div class="popup-row">
+                        <label>Alpha:</label>
+                        <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.05"
+                            value={currentStyle.backgroundAlpha ?? 0.5}
+                            onchange={(e) =>
+                                updateFn({
+                                    backgroundAlpha: parseFloat(
+                                        (e.target as HTMLInputElement).value,
+                                    ),
+                                })}
+                        />
+                        <span
+                            >{Math.round(
+                                (currentStyle.backgroundAlpha ?? 0.5) * 100,
+                            )}%</span
+                        >
+                    </div>
+                {/if}
+            </section>
+            <section>
+                <h4>Edge Effect</h4>
+                <div class="popup-row edge-checks">
+                    <label>Types:</label>
+                    <div class="edge-check-group">
+                        {#each ["outline", "shadow", "glow", "bevel"] as type}
+                            <label class="edge-check-label">
                                 <input
                                     type="checkbox"
-                                    checked={!!currentStyle.backgroundColor}
-                                    onchange={(e) =>
+                                    checked={currentStyle.edgeEffects?.[
+                                        type as "outline"
+                                    ]?.enabled ?? false}
+                                    onchange={(e) => {
+                                        const active = (
+                                            e.target as HTMLInputElement
+                                        ).checked;
+                                        const nextEffects = {
+                                            ...(currentStyle.edgeEffects || {}),
+                                        };
+                                        (nextEffects as any)[type] = {
+                                            ...((nextEffects as any)[type] || {
+                                                color: "#000000",
+                                                width: 1,
+                                            }),
+                                            enabled: active,
+                                        };
                                         updateFn({
-                                            backgroundColor: (
-                                                e.target as HTMLInputElement
-                                            ).checked
-                                                ? "#000000"
-                                                : undefined,
-                                        })}
+                                            edgeEffects: nextEffects,
+                                        });
+                                        if (active) activeEdgeTab = type as any;
+                                    }}
                                 />
-                            </div>
-                            {#if currentStyle.backgroundColor}
-                                <div class="popup-row">
-                                    <label>Color:</label>
-                                    <input
-                                        type="color"
-                                        value={currentStyle.backgroundColor}
-                                        onchange={(e) =>
-                                            updateFn({
-                                                backgroundColor: (
-                                                    e.target as HTMLInputElement
-                                                ).value,
-                                            })}
-                                    />
-                                </div>
-                                <div class="popup-row">
-                                    <label>Alpha:</label>
-                                    <input
-                                        type="range"
-                                        min="0"
-                                        max="1"
-                                        step="0.05"
-                                        value={currentStyle.backgroundAlpha ??
-                                            0.5}
-                                        onchange={(e) =>
-                                            updateFn({
-                                                backgroundAlpha: parseFloat(
-                                                    (
-                                                        e.target as HTMLInputElement
-                                                    ).value,
-                                                ),
-                                            })}
-                                    />
-                                    <span
-                                        >{Math.round(
-                                            (currentStyle.backgroundAlpha ??
-                                                0.5) * 100,
-                                        )}%</span
-                                    >
-                                </div>
+                                {type.charAt(0).toUpperCase() + type.slice(1)}
+                            </label>
+                        {/each}
+                    </div>
+                </div>
+
+                {#if Object.values(currentStyle.edgeEffects || {}).some((e) => e.enabled)}
+                    <div class="edge-tabs">
+                        {#each ["outline", "shadow", "glow", "bevel"] as type}
+                            {#if currentStyle.edgeEffects?.[type as "outline"]?.enabled}
+                                <button
+                                    class="edge-tab"
+                                    class:active={activeEdgeTab === type}
+                                    onclick={() =>
+                                        (activeEdgeTab = type as any)}
+                                >
+                                    {type}
+                                </button>
                             {/if}
-                        </section>
-                        <section>
-                            <h4>Edge Effect</h4>
-                            <div class="popup-row edge-checks">
-                                <label>Types:</label>
-                                <div class="edge-check-group">
-                                    {#each ["outline", "shadow", "glow", "bevel"] as type}
-                                        <label class="edge-check-label">
-                                            <input
-                                                type="checkbox"
-                                                checked={currentStyle
-                                                    .edgeEffects?.[type]
-                                                    ?.enabled ?? false}
-                                                onchange={(e) => {
-                                                    const active = (
-                                                        e.target as HTMLInputElement
-                                                    ).checked;
-                                                    const nextEffects = {
-                                                        ...(currentStyle.edgeEffects ||
-                                                            {}),
-                                                    };
-                                                    nextEffects[
-                                                        type as keyof typeof nextEffects
-                                                    ] = {
-                                                        ...(nextEffects[
-                                                            type as keyof typeof nextEffects
-                                                        ] || {
-                                                            color: "#000000",
-                                                            width: 1,
-                                                        }),
-                                                        enabled: active,
-                                                    };
-                                                    updateFn({
-                                                        edgeEffects:
-                                                            nextEffects,
-                                                    });
-                                                    if (active)
-                                                        activeEdgeTab =
-                                                            type as any;
-                                                }}
-                                            />
-                                            {type.charAt(0).toUpperCase() +
-                                                type.slice(1)}
-                                        </label>
-                                    {/each}
-                                </div>
-                            </div>
+                        {/each}
+                    </div>
 
-                            {#if Object.values(currentStyle.edgeEffects || {}).some((e) => e.enabled)}
-                                <div class="edge-tabs">
-                                    {#each ["outline", "shadow", "glow", "bevel"] as type}
-                                        {#if currentStyle.edgeEffects?.[type as "outline"]?.enabled}
-                                            <button
-                                                class="edge-tab"
-                                                class:active={activeEdgeTab ===
-                                                    type}
-                                                onclick={() =>
-                                                    (activeEdgeTab =
-                                                        type as any)}
-                                            >
-                                                {type}
-                                            </button>
-                                        {/if}
-                                    {/each}
-                                </div>
+                    {@const activeConfig =
+                        currentStyle.edgeEffects?.[activeEdgeTab]}
+                    {#if activeConfig && activeConfig.enabled}
+                        <div class="popup-row">
+                            <label>Color:</label>
+                            <input
+                                type="color"
+                                value={activeConfig.color ?? "#000000"}
+                                onchange={(e) => {
+                                    const nextEffects = {
+                                        ...(currentStyle.edgeEffects || {}),
+                                    };
+                                    (nextEffects as any)[activeEdgeTab] = {
+                                        ...activeConfig,
+                                        color: (e.target as HTMLInputElement)
+                                            .value,
+                                    };
+                                    updateFn({
+                                        edgeEffects: nextEffects,
+                                    });
+                                }}
+                            />
+                        </div>
+                        <div class="popup-row">
+                            <label>Width:</label>
+                            <input
+                                type="range"
+                                min="0"
+                                max="10"
+                                step="0.5"
+                                value={activeConfig.width ?? 1}
+                                onchange={(e) => {
+                                    const nextEffects = {
+                                        ...(currentStyle.edgeEffects || {}),
+                                    };
+                                    (nextEffects as any)[activeEdgeTab] = {
+                                        ...activeConfig,
+                                        width: parseFloat(
+                                            (e.target as HTMLInputElement)
+                                                .value,
+                                        ),
+                                    };
+                                    updateFn({
+                                        edgeEffects: nextEffects,
+                                    });
+                                }}
+                            />
+                            <span>{activeConfig.width}px</span>
+                        </div>
+                    {/if}
+                {/if}
+            </section>
+        {:else}
+            {@const currentStyle =
+                selectedData.cue.styleOverride ??
+                selectedData.track.defaultStyle}
+            {@const updateFn = (s: any) =>
+                commandManager.execute(
+                    new UpdateCueStyleCommand(
+                        selectedData.trackId,
+                        selectedData.cue.id,
+                        s,
+                    ),
+                )}
 
-                                {@const activeConfig =
-                                    currentStyle.edgeEffects?.[activeEdgeTab]}
-                                {#if activeConfig && activeConfig.enabled}
-                                    <div class="popup-row">
-                                        <label>Color:</label>
-                                        <input
-                                            type="color"
-                                            value={activeConfig.color ??
-                                                "#000000"}
-                                            onchange={(e) => {
-                                                const nextEffects = {
-                                                    ...(currentStyle.edgeEffects ||
-                                                        {}),
-                                                };
-                                                nextEffects[activeEdgeTab] = {
-                                                    ...activeConfig,
-                                                    color: (
-                                                        e.target as HTMLInputElement
-                                                    ).value,
-                                                };
-                                                updateFn({
-                                                    edgeEffects: nextEffects,
-                                                });
-                                            }}
-                                        />
-                                    </div>
-                                    <div class="popup-row">
-                                        <label>Width:</label>
-                                        <input
-                                            type="range"
-                                            min="0"
-                                            max="10"
-                                            step="0.5"
-                                            value={activeConfig.width ?? 1}
-                                            onchange={(e) => {
-                                                const nextEffects = {
-                                                    ...(currentStyle.edgeEffects ||
-                                                        {}),
-                                                };
-                                                nextEffects[activeEdgeTab] = {
-                                                    ...activeConfig,
-                                                    width: parseFloat(
-                                                        (
-                                                            e.target as HTMLInputElement
-                                                        ).value,
-                                                    ),
-                                                };
-                                                updateFn({
-                                                    edgeEffects: nextEffects,
-                                                });
-                                            }}
-                                        />
-                                        <span>{activeConfig.width}px</span>
-                                    </div>
-                                {/if}
+            <!-- Opacity Section with Keyframing -->
+            {@const alphaParamPath = "alpha"}
+            {@const alphaAnimTrack = selectedData.cue.animTracks.find(
+                (a: any) => a.paramPath === alphaParamPath,
+            )}
+            {@const alphaHasKeyframe = alphaAnimTrack?.keyframes.some(
+                (k: any) => Math.abs(k.tMs - projectStore.currentTime) < 1,
+            )}
+            {@const currentAlpha = getCueValueAt(
+                selectedData.cue,
+                alphaParamPath,
+                selectedData.cue.styleOverride?.alpha ??
+                    selectedData.track.defaultStyle.alpha ??
+                    1,
+                projectStore.currentTime,
+            )}
+
+            <section>
+                <div
+                    style="display: flex; justify-content: space-between; align-items: center;"
+                >
+                    <h4>Opacity (Fade In/Out)</h4>
+                    <button
+                        class="small-btn kf-btn"
+                        class:active={alphaHasKeyframe}
+                        onclick={() => {
+                            if (alphaHasKeyframe) {
+                                commandManager.execute(
+                                    new RemoveKeyframeCommand(
+                                        selectedData.trackId,
+                                        alphaParamPath,
+                                        projectStore.currentTime,
+                                        selectedData.cue.id,
+                                    ),
+                                );
+                            } else {
+                                commandManager.execute(
+                                    new AddKeyframeCommand(
+                                        selectedData.trackId,
+                                        alphaParamPath,
+                                        {
+                                            id: crypto.randomUUID(),
+                                            tMs: projectStore.currentTime,
+                                            value: currentAlpha,
+                                            interp: "linear",
+                                        },
+                                        selectedData.cue.id,
+                                    ),
+                                );
+                            }
+                        }}
+                        title="Toggle Keyframe for Opacity"
+                    >
+                        <Diamond
+                            size={12}
+                            fill={alphaHasKeyframe ? "currentColor" : "none"}
+                        />
+                    </button>
+                </div>
+                <div class="popup-row">
+                    <label>Value:</label>
+                    <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={currentAlpha}
+                        onchange={(e) => {
+                            const val = parseFloat(
+                                (e.target as HTMLInputElement).value,
+                            );
+                            updateFn({ alpha: val });
+                            if (alphaHasKeyframe) {
+                                commandManager.execute(
+                                    new UpdateKeyframeValueCommand(
+                                        selectedData.trackId,
+                                        alphaParamPath,
+                                        projectStore.currentTime,
+                                        val,
+                                        selectedData.cue.id,
+                                    ),
+                                );
+                            } else if (alphaAnimTrack) {
+                                commandManager.execute(
+                                    new AddKeyframeCommand(
+                                        selectedData.trackId,
+                                        alphaParamPath,
+                                        {
+                                            id: crypto.randomUUID(),
+                                            tMs: projectStore.currentTime,
+                                            value: val,
+                                            interp: "linear",
+                                        },
+                                        selectedData.cue.id,
+                                    ),
+                                );
+                            }
+                        }}
+                    />
+                    <span>{Math.round(currentAlpha * 100)}%</span>
+                </div>
+            </section>
+
+            <section>
+                <h4>Background</h4>
+                <div class="popup-row">
+                    <label>Box:</label>
+                    <input
+                        type="checkbox"
+                        checked={!!currentStyle.backgroundColor}
+                        onchange={(e) =>
+                            updateFn({
+                                backgroundColor: (e.target as HTMLInputElement)
+                                    .checked
+                                    ? "#000000"
+                                    : undefined,
+                            })}
+                    />
+                </div>
+                {#if currentStyle.backgroundColor}
+                    <div class="popup-row">
+                        <label>Color:</label>
+                        <input
+                            type="color"
+                            value={currentStyle.backgroundColor}
+                            onchange={(e) =>
+                                updateFn({
+                                    backgroundColor: (
+                                        e.target as HTMLInputElement
+                                    ).value,
+                                })}
+                        />
+                    </div>
+                    <div class="popup-row">
+                        <label>Alpha:</label>
+                        <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.05"
+                            value={currentStyle.backgroundAlpha ?? 0.5}
+                            onchange={(e) =>
+                                updateFn({
+                                    backgroundAlpha: parseFloat(
+                                        (e.target as HTMLInputElement).value,
+                                    ),
+                                })}
+                        />
+                        <span
+                            >{Math.round(
+                                (currentStyle.backgroundAlpha ?? 0.5) * 100,
+                            )}%</span
+                        >
+                    </div>
+                {/if}
+            </section>
+            <section>
+                <h4>Edge Effect</h4>
+                <div class="popup-row edge-checks">
+                    <label>Types:</label>
+                    <div class="edge-check-group">
+                        {#each ["outline", "shadow", "glow", "bevel"] as type}
+                            <label class="edge-check-label">
+                                <input
+                                    type="checkbox"
+                                    checked={currentStyle.edgeEffects?.[
+                                        type as "outline"
+                                    ]?.enabled ?? false}
+                                    onchange={(e) => {
+                                        const active = (
+                                            e.target as HTMLInputElement
+                                        ).checked;
+                                        const nextEffects = {
+                                            ...(currentStyle.edgeEffects || {}),
+                                        };
+                                        (nextEffects as any)[type] = {
+                                            ...((nextEffects as any)[type] || {
+                                                color: "#000000",
+                                                width: 1,
+                                            }),
+                                            enabled: active,
+                                        };
+                                        updateFn({
+                                            edgeEffects: nextEffects,
+                                        });
+                                        if (active) activeEdgeTab = type as any;
+                                    }}
+                                />
+                                {type.charAt(0).toUpperCase() + type.slice(1)}
+                            </label>
+                        {/each}
+                    </div>
+                </div>
+
+                {#if Object.values(currentStyle.edgeEffects || {}).some((e) => e.enabled)}
+                    <div class="edge-tabs">
+                        {#each ["outline", "shadow", "glow", "bevel"] as type}
+                            {#if currentStyle.edgeEffects?.[type as "outline"]?.enabled}
+                                <button
+                                    class="edge-tab"
+                                    class:active={activeEdgeTab === type}
+                                    onclick={() =>
+                                        (activeEdgeTab = type as any)}
+                                >
+                                    {type}
+                                </button>
                             {/if}
-                        </section>
-                    {:else}
-                        {@const currentStyle =
-                            selectedData.cue.styleOverride ??
-                            selectedData.track.defaultStyle}
-                        {@const updateFn = (s: any) =>
-                            commandManager.execute(
-                                new UpdateCueStyleCommand(
-                                    selectedData.trackId,
-                                    selectedData.cue.id,
-                                    s,
-                                ),
-                            )}
+                        {/each}
+                    </div>
 
-                        <!-- Opacity Section with Keyframing -->
-                        {@const alphaParamPath = "alpha"}
-                        {@const alphaAnimTrack =
+                    {@const activeConfig =
+                        currentStyle.edgeEffects?.[activeEdgeTab]}
+                    {#if activeConfig && activeConfig.enabled}
+                        {@const edgeParamPath = `edgeEffects.${activeEdgeTab}.width`}
+                        {@const edgeAnimTrack =
                             selectedData.cue.animTracks.find(
-                                (a: any) => a.paramPath === alphaParamPath,
+                                (a: any) => a.paramPath === edgeParamPath,
                             )}
-                        {@const alphaHasKeyframe =
-                            alphaAnimTrack?.keyframes.some(
-                                (k: any) =>
-                                    Math.abs(k.tMs - projectStore.currentTime) <
-                                    1,
-                            )}
-                        {@const currentAlpha = getCueValueAt(
+                        {@const edgeHasKeyframe = edgeAnimTrack?.keyframes.some(
+                            (k: any) =>
+                                Math.abs(k.tMs - projectStore.currentTime) < 1,
+                        )}
+                        {@const resolvedWidth = getCueValueAt(
                             selectedData.cue,
-                            alphaParamPath,
-                            selectedData.cue.styleOverride?.alpha ??
-                                selectedData.track.defaultStyle.alpha ??
-                                1,
+                            edgeParamPath,
+                            activeConfig.width ?? 1,
                             projectStore.currentTime,
                         )}
 
-                        <section>
+                        <div class="popup-row">
+                            <label>Color:</label>
+                            <input
+                                type="color"
+                                value={activeConfig.color ?? "#000000"}
+                                onchange={(e) => {
+                                    const nextEffects = {
+                                        ...(currentStyle.edgeEffects || {}),
+                                    };
+                                    (nextEffects as any)[activeEdgeTab] = {
+                                        ...activeConfig,
+                                        color: (e.target as HTMLInputElement)
+                                            .value,
+                                    };
+                                    updateFn({
+                                        edgeEffects: nextEffects,
+                                    });
+                                }}
+                            />
+                        </div>
+                        <div class="popup-row" style="margin-bottom: 4px;">
                             <div
-                                style="display: flex; justify-content: space-between; align-items: center;"
+                                style="display: flex; justify-content: space-between; align-items: center; width: 100%;"
                             >
-                                <h4>Opacity (Fade In/Out)</h4>
+                                <label>Width:</label>
                                 <button
                                     class="small-btn kf-btn"
-                                    class:active={alphaHasKeyframe}
+                                    class:active={edgeHasKeyframe}
                                     onclick={() => {
-                                        if (alphaHasKeyframe) {
+                                        if (edgeHasKeyframe) {
                                             commandManager.execute(
                                                 new RemoveKeyframeCommand(
                                                     selectedData.trackId,
-                                                    alphaParamPath,
+                                                    edgeParamPath,
                                                     projectStore.currentTime,
                                                     selectedData.cue.id,
                                                 ),
                                             );
                                         } else {
-                                            // Add keyframe with current value
                                             commandManager.execute(
                                                 new AddKeyframeCommand(
                                                     selectedData.trackId,
-                                                    alphaParamPath,
+                                                    edgeParamPath,
                                                     {
                                                         id: crypto.randomUUID(),
                                                         tMs: projectStore.currentTime,
-                                                        value: currentAlpha,
+                                                        value: resolvedWidth,
                                                         interp: "linear",
                                                     },
                                                     selectedData.cue.id,
@@ -1344,351 +1601,96 @@
                                             );
                                         }
                                     }}
-                                    title="Toggle Keyframe for Opacity"
+                                    title={`Toggle Keyframe for ${activeEdgeTab} width`}
                                 >
                                     <Diamond
                                         size={12}
-                                        fill={alphaHasKeyframe
+                                        fill={edgeHasKeyframe
                                             ? "currentColor"
                                             : "none"}
                                     />
                                 </button>
                             </div>
-                            <div class="popup-row">
-                                <label>Value:</label>
-                                <input
-                                    type="range"
-                                    min="0"
-                                    max="1"
-                                    step="0.05"
-                                    value={currentAlpha}
-                                    onchange={(e) => {
-                                        const val = parseFloat(
-                                            (e.target as HTMLInputElement)
-                                                .value,
+                        </div>
+                        <div class="popup-row">
+                            <input
+                                type="range"
+                                min="0"
+                                max="10"
+                                step="0.5"
+                                value={resolvedWidth}
+                                onchange={(e) => {
+                                    const val = parseFloat(
+                                        (e.target as HTMLInputElement).value,
+                                    );
+                                    const nextEffects = {
+                                        ...(currentStyle.edgeEffects || {}),
+                                    };
+                                    (nextEffects as any)[activeEdgeTab] = {
+                                        ...activeConfig,
+                                        width: val,
+                                    };
+                                    updateFn({
+                                        edgeEffects: nextEffects,
+                                    });
+
+                                    if (edgeHasKeyframe) {
+                                        commandManager.execute(
+                                            new UpdateKeyframeValueCommand(
+                                                selectedData.trackId,
+                                                edgeParamPath,
+                                                projectStore.currentTime,
+                                                val,
+                                                selectedData.cue.id,
+                                            ),
                                         );
-                                        // Update style
-                                        updateFn({ alpha: val });
-
-                                        // Update Keyframe if exists
-                                        if (alphaHasKeyframe) {
-                                            commandManager.execute(
-                                                new UpdateKeyframeValueCommand(
-                                                    selectedData.trackId,
-                                                    alphaParamPath,
-                                                    projectStore.currentTime,
-                                                    val,
-                                                    selectedData.cue.id,
-                                                ),
-                                            );
-                                        } else if (alphaAnimTrack) {
-                                            // Auto-add keyframe if track exists but no keyframe at this time?
-                                            // The user logic usually requires explicit add if not present,
-                                            // but for sliders often auto-add is preferred if track exists.
-                                            // For now, let's just update value mostly.
-                                            // But wait, the slider should update the base value OR the keyframe.
-                                            // If anim exists, we should probably add keyframe.
-                                            // Let's mimic the position logic:
-                                            commandManager.execute(
-                                                new AddKeyframeCommand(
-                                                    selectedData.trackId,
-                                                    alphaParamPath,
-                                                    {
-                                                        id: crypto.randomUUID(),
-                                                        tMs: projectStore.currentTime,
-                                                        value: val,
-                                                        interp: "linear",
-                                                    },
-                                                    selectedData.cue.id,
-                                                ),
-                                            );
-                                        }
-                                    }}
-                                />
-                                <span>{Math.round(currentAlpha * 100)}%</span>
-                            </div>
-                        </section>
-
-                        <section>
-                            <h4>Background</h4>
-                            <div class="popup-row">
-                                <label>Box:</label>
-                                <input
-                                    type="checkbox"
-                                    checked={!!currentStyle.backgroundColor}
-                                    onchange={(e) =>
-                                        updateFn({
-                                            backgroundColor: (
-                                                e.target as HTMLInputElement
-                                            ).checked
-                                                ? "#000000"
-                                                : undefined,
-                                        })}
-                                />
-                            </div>
-                            {#if currentStyle.backgroundColor}
-                                <div class="popup-row">
-                                    <label>Color:</label>
-                                    <input
-                                        type="color"
-                                        value={currentStyle.backgroundColor}
-                                        onchange={(e) =>
-                                            updateFn({
-                                                backgroundColor: (
-                                                    e.target as HTMLInputElement
-                                                ).value,
-                                            })}
-                                    />
-                                </div>
-                                <div class="popup-row">
-                                    <label>Alpha:</label>
-                                    <input
-                                        type="range"
-                                        min="0"
-                                        max="1"
-                                        step="0.05"
-                                        value={currentStyle.backgroundAlpha ??
-                                            0.5}
-                                        onchange={(e) =>
-                                            updateFn({
-                                                backgroundAlpha: parseFloat(
-                                                    (
-                                                        e.target as HTMLInputElement
-                                                    ).value,
-                                                ),
-                                            })}
-                                    />
-                                    <span
-                                        >{Math.round(
-                                            (currentStyle.backgroundAlpha ??
-                                                0.5) * 100,
-                                        )}%</span
-                                    >
-                                </div>
-                            {/if}
-                        </section>
-                        <section>
-                            <h4>Edge Effect</h4>
-                            <div class="popup-row edge-checks">
-                                <label>Types:</label>
-                                <div class="edge-check-group">
-                                    {#each ["outline", "shadow", "glow", "bevel"] as type}
-                                        <label class="edge-check-label">
-                                            <input
-                                                type="checkbox"
-                                                checked={currentStyle
-                                                    .edgeEffects?.[
-                                                    type as "outline"
-                                                ]?.enabled ?? false}
-                                                onchange={(e) => {
-                                                    const active = (
-                                                        e.target as HTMLInputElement
-                                                    ).checked;
-                                                    const nextEffects = {
-                                                        ...(currentStyle.edgeEffects ||
-                                                            {}),
-                                                    };
-                                                    (nextEffects as any)[type] =
-                                                        {
-                                                            ...((
-                                                                nextEffects as any
-                                                            )[type] || {
-                                                                color: "#000000",
-                                                                width: 1,
-                                                            }),
-                                                            enabled: active,
-                                                        };
-                                                    updateFn({
-                                                        edgeEffects:
-                                                            nextEffects,
-                                                    });
-                                                    if (active)
-                                                        activeEdgeTab =
-                                                            type as any;
-                                                }}
-                                            />
-                                            {type.charAt(0).toUpperCase() +
-                                                type.slice(1)}
-                                        </label>
-                                    {/each}
-                                </div>
-                            </div>
-
-                            {#if Object.values(currentStyle.edgeEffects || {}).some((e) => e.enabled)}
-                                <div class="edge-tabs">
-                                    {#each ["outline", "shadow", "glow", "bevel"] as type}
-                                        {#if currentStyle.edgeEffects?.[type as "outline"]?.enabled}
-                                            <button
-                                                class="edge-tab"
-                                                class:active={activeEdgeTab ===
-                                                    type}
-                                                onclick={() =>
-                                                    (activeEdgeTab =
-                                                        type as any)}
-                                            >
-                                                {type}
-                                            </button>
-                                        {/if}
-                                    {/each}
-                                </div>
-
-                                {@const activeConfig =
-                                    currentStyle.edgeEffects?.[activeEdgeTab]}
-                                {#if activeConfig && activeConfig.enabled}
-                                    {@const edgeParamPath = `edgeEffects.${activeEdgeTab}.width`}
-                                    {@const edgeAnimTrack =
-                                        selectedData.cue.animTracks.find(
-                                            (a: any) =>
-                                                a.paramPath === edgeParamPath,
-                                        )}
-                                    {@const edgeHasKeyframe =
-                                        edgeAnimTrack?.keyframes.some(
-                                            (k: any) =>
-                                                Math.abs(
-                                                    k.tMs -
-                                                        projectStore.currentTime,
-                                                ) < 1,
-                                        )}
-                                    {@const resolvedWidth = getCueValueAt(
-                                        selectedData.cue,
-                                        edgeParamPath,
-                                        activeConfig.width ?? 1,
-                                        projectStore.currentTime,
-                                    )}
-
-                                    <div class="popup-row">
-                                        <label>Color:</label>
-                                        <input
-                                            type="color"
-                                            value={activeConfig.color ??
-                                                "#000000"}
-                                            onchange={(e) => {
-                                                const nextEffects = {
-                                                    ...(currentStyle.edgeEffects ||
-                                                        {}),
-                                                };
-                                                (nextEffects as any)[
-                                                    activeEdgeTab
-                                                ] = {
-                                                    ...activeConfig,
-                                                    color: (
-                                                        e.target as HTMLInputElement
-                                                    ).value,
-                                                };
-                                                updateFn({
-                                                    edgeEffects: nextEffects,
-                                                });
-                                            }}
-                                        />
-                                    </div>
-                                    <div
-                                        class="popup-row"
-                                        style="margin-bottom: 4px;"
-                                    >
-                                        <div
-                                            style="display: flex; justify-content: space-between; align-items: center; width: 100%;"
-                                        >
-                                            <label>Width:</label>
-                                            <button
-                                                class="small-btn kf-btn"
-                                                class:active={edgeHasKeyframe}
-                                                onclick={() => {
-                                                    if (edgeHasKeyframe) {
-                                                        commandManager.execute(
-                                                            new RemoveKeyframeCommand(
-                                                                selectedData.trackId,
-                                                                edgeParamPath,
-                                                                projectStore.currentTime,
-                                                                selectedData.cue.id,
-                                                            ),
-                                                        );
-                                                    } else {
-                                                        commandManager.execute(
-                                                            new AddKeyframeCommand(
-                                                                selectedData.trackId,
-                                                                edgeParamPath,
-                                                                {
-                                                                    id: crypto.randomUUID(),
-                                                                    tMs: projectStore.currentTime,
-                                                                    value: resolvedWidth,
-                                                                    interp: "linear",
-                                                                },
-                                                                selectedData.cue.id,
-                                                            ),
-                                                        );
-                                                    }
-                                                }}
-                                                title={`Toggle Keyframe for ${activeEdgeTab} width`}
-                                            >
-                                                <Diamond
-                                                    size={12}
-                                                    fill={edgeHasKeyframe
-                                                        ? "currentColor"
-                                                        : "none"}
-                                                />
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <div class="popup-row">
-                                        <input
-                                            type="range"
-                                            min="0"
-                                            max="10"
-                                            step="0.5"
-                                            value={resolvedWidth}
-                                            onchange={(e) => {
-                                                const val = parseFloat(
-                                                    (
-                                                        e.target as HTMLInputElement
-                                                    ).value,
-                                                );
-                                                const nextEffects = {
-                                                    ...(currentStyle.edgeEffects ||
-                                                        {}),
-                                                };
-                                                (nextEffects as any)[
-                                                    activeEdgeTab
-                                                ] = {
-                                                    ...activeConfig,
-                                                    width: val,
-                                                };
-                                                updateFn({
-                                                    edgeEffects: nextEffects,
-                                                });
-
-                                                if (edgeHasKeyframe) {
-                                                    commandManager.execute(
-                                                        new UpdateKeyframeValueCommand(
-                                                            selectedData.trackId,
-                                                            edgeParamPath,
-                                                            projectStore.currentTime,
-                                                            val,
-                                                            selectedData.cue.id,
-                                                        ),
-                                                    );
-                                                } else if (edgeAnimTrack) {
-                                                    commandManager.execute(
-                                                        new AddKeyframeCommand(
-                                                            selectedData.trackId,
-                                                            edgeParamPath,
-                                                            {
-                                                                id: crypto.randomUUID(),
-                                                                tMs: projectStore.currentTime,
-                                                                value: val,
-                                                                interp: "linear",
-                                                            },
-                                                            selectedData.cue.id,
-                                                        ),
-                                                    );
-                                                }
-                                            }}
-                                        />
-                                        <span>{resolvedWidth}px</span>
-                                    </div>
-                                {/if}
-                            {/if}
-                        </section>
+                                    } else if (edgeAnimTrack) {
+                                        commandManager.execute(
+                                            new AddKeyframeCommand(
+                                                selectedData.trackId,
+                                                edgeParamPath,
+                                                {
+                                                    id: crypto.randomUUID(),
+                                                    tMs: projectStore.currentTime,
+                                                    value: val,
+                                                    interp: "linear",
+                                                },
+                                                selectedData.cue.id,
+                                            ),
+                                        );
+                                    }
+                                }}
+                            />
+                            <span>{resolvedWidth}px</span>
+                        </div>
                     {/if}
+                {/if}
+            </section>
+        {/if}
+    {/snippet}
+
+    {#if showStylePopup && selectedData}
+        <div
+            class="style-popup-container"
+            style="left: {popupPos.x}px; top: {popupPos.y}px;"
+            class:dragging={isDraggingPopup}
+            class:over-dock={isOverDockZone}
+        >
+            <div class="style-popup">
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div class="popup-header" onmousedown={handlePopupMouseDown}>
+                    <h3>
+                        Advanced Styling ({popupType === "track"
+                            ? "Track"
+                            : "Individual"})
+                    </h3>
+                    <button class="close-btn" onclick={closeStylePopup}>
+                        <X size={16} />
+                    </button>
+                </div>
+
+                <div class="popup-scroll">
+                    {@render styleContent()}
                 </div>
 
                 <div class="popup-footer">
@@ -1894,14 +1896,46 @@
         border-radius: 4px;
         font-size: 0.8rem;
     }
-    .modal-overlay {
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.5);
-        z-index: 999;
+
+    /* Modal overlay removed for non-modal behavior */
+
+    /* Tab enhancements */
+    .style-tab {
+        position: relative;
+        padding-right: 28px;
+        display: flex;
+        align-items: center;
+        padding-left: 0;
+    }
+    .tab-inner-btn {
+        background: none;
+        border: none;
+        color: inherit;
+        font: inherit;
+        padding: 0.5rem 0.75rem;
+        cursor: pointer;
+        flex: 1;
+        text-align: left;
+    }
+    .tab-close-btn {
+        position: absolute;
+        right: 4px;
+        top: 50%;
+        transform: translateY(-50%);
+        background: none;
+        border: none;
+        color: var(--text-dim);
+        cursor: pointer;
         display: flex;
         align-items: center;
         justify-content: center;
+        width: 18px;
+        height: 18px;
+        border-radius: 4px;
+    }
+    .tab-close-btn:hover {
+        background: rgba(255, 255, 255, 0.1);
+        color: var(--text-main);
     }
 
     /* Keyframe Tab Styles */
@@ -2108,12 +2142,49 @@
         flex-direction: column;
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
     }
+    .style-popup-container {
+        position: fixed;
+        z-index: 1000;
+        pointer-events: auto;
+    }
+    .style-popup-container.dragging {
+        opacity: 0.8;
+        cursor: grabbing;
+    }
+    .style-popup-container.over-dock .style-popup {
+        outline: 2px dashed var(--accent);
+        background: rgba(74, 144, 226, 0.2);
+    }
+
+    .popup-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.5rem 1rem;
+        cursor: grab;
+        border-bottom: 1px solid var(--border-dark);
+        background: var(--bg-header);
+        user-select: none;
+    }
+    .popup-header:active {
+        cursor: grabbing;
+    }
     .style-popup h3 {
         margin: 0;
-        padding: 1rem;
-        border-bottom: 1px solid var(--border-dark);
-        font-size: 1rem;
+        font-size: 0.9rem;
         color: var(--accent);
+    }
+    .close-btn {
+        background: none;
+        border: none;
+        color: var(--text-dim);
+        cursor: pointer;
+        padding: 4px;
+        display: flex;
+        align-items: center;
+    }
+    .close-btn:hover {
+        color: #fff;
     }
     .popup-scroll {
         flex: 1;
@@ -2196,6 +2267,28 @@
         color: var(--text-main);
         cursor: pointer;
     }
+    .edge-check-label input[type="checkbox"] {
+        margin: 0;
+    }
+
+    /* Docked Content Styles */
+    .style-dock-content {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+    }
+    .dock-header {
+        margin-bottom: 1rem;
+    }
+    .dock-header h3 {
+        margin: 0;
+        font-size: 1rem;
+        color: var(--accent);
+    }
+    .style-section-content {
+        padding-bottom: 2rem;
+    }
+
     .edge-check-label input[type="checkbox"] {
         width: auto;
         margin: 0;

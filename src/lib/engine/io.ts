@@ -140,6 +140,11 @@ export async function exportSubtitle() {
     const track = projectStore.project.tracks.find(t => t.id === trackId);
     if (!track) return false;
 
+    if (track.excludeFromExport) {
+        console.warn('Track is excluded from export');
+        // Optional: show a message to the user?
+    }
+
     const path = await save({
         filters: [{
             name: 'Subtitle',
