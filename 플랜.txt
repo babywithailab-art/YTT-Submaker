@@ -1,0 +1,927 @@
+0) 목표 요약
+
+개인용 자막툴(윈도우, 무설치 배포)
+
+Svelte 5로 UI 구현
+
+영상 프리뷰 + 웨이브폼 + 타임라인(트랙)
+
+자막 트랙(레이어) 추가 가능
+
+한 시점에 여러 자막 동시 표시 가능
+
+영상 위에서 자막 레이어 선택/이동(드래그) 가능
+
+자막 텍스트는 편집 가능(큐 단위)
+
+텍스트 드래그 선택으로 “부분 효과(스팬)” 적용 가능
+
+레이어 전체 효과(트랙), 큐 전체 효과(큐), 부분 효과(스팬) 모두 지원
+
+세세한 값(색/투명/외곽선/그림자/배경/위치/정렬/폰트/크기 등) 조절 가능
+
+분할/병합/제거 + 실행취소/다시실행(Undo/Redo) 필수
+
+패널(창) 최소화, 팝업(플로팅), 위치 변경(드래그), 도킹 지원
+
+효과/태그는 플러그인처럼 외부 파일로 공유/불러오기 가능
+
+저장/출력:
+
+ASS 저장(연출 보존용)
+
+YTT/SRV3 저장(유튜브 업로드용, 컨버터로 최대 보존)
+
+(옵션) SRT/VTT 출력은 호환용
+
+1) 기술 스택/구조
+1-1. 플랫폼
+
+윈도우 데스크톱 앱: (권장) Tauri + Svelte 5
+
+배포: 폴더형(Portable dir) + zip 무설치 배포
+
+1-2. 앱 구조(3계층)
+
+UI(Svelte 5 컴포넌트): 화면/입력/패널 레이아웃
+
+Store(State): 프로젝트/선택/재생 상태(단일 소스)
+
+Engine(순수 TS 모듈):
+
+태그/스팬 적용 알고리즘
+
+렌더 레이아웃(오버레이 bbox)
+
+hit-test/드래그
+
+웨이브폼 peaks 생성/캐시
+
+Exporter(ASS, YTT/SRV3)
+
+플러그인 로딩/검증
+
+2) 데이터 모델(핵심)
+2-1. 프로젝트(Project)
+
+projectId, name, createdAt, updatedAt
+
+media:
+
+videoPath
+
+audioPath (없으면 추출/캐시)
+
+durationMs
+
+fps?
+
+tracks: Track[]
+
+pluginsInstalled: PluginManifest[]
+
+appLayout: LayoutState (패널 배치 저장)
+
+exportProfiles (YTT 샘플링 품질 프리셋 등)
+
+2-2. 트랙(레이어) Track
+
+id, name, order, visible, locked
+
+transform (레이어 전체 위치/정렬 기반)
+
+xNorm, yNorm (0~1 정규화 좌표)
+
+anchor (9-grid 또는 px)
+
+scale, rotation? (ASS용은 가능, YTT는 제한)
+
+defaultStyle (레이어 기본 스타일)
+
+trackEffects[] (레이어 전체 이펙트/프리셋 참조)
+
+cues: Cue[]
+
+2-3. 큐(자막 블록) Cue
+
+id, startMs, endMs
+
+plainText: string (내부 편집용 텍스트)
+
+spans: Span[] (부분 효과)
+
+cueStyleOverride?
+
+cueEffects[]
+
+posOverride? (옵션: 큐만 위치 다르게)
+
+2-4. 스팬(부분효과) Span
+
+{ startChar, endChar, stylePatch, effects? }
+
+stylePatch는 “변경만” 저장(예: { bold:true, color:"#ff0" })
+
+2-5. 스타일/효과 참조
+
+stylePresetId?: string
+
+effectPresetId?: string
+
+실제 내용은 플러그인/내장 레지스트리에서 조회
+
+3) 스타일/효과 적용 우선순위
+
+겹칠 때 우선순위:
+
+Span(부분)
+
+Cue override(블록 전체)
+
+Track default/effects(레이어 전체)
+
+Project global default
+
+이 우선순위로 “최종 렌더 스타일”을 계산.
+
+4) 텍스트 편집 UX(어디서/어떻게)
+4-1. 편집 위치(3가지 동선)
+
+우측 패널 텍스트 에디터(주 편집)
+
+선택한 cue의 plainText 편집
+
+드래그 선택 범위에 부분효과 적용(스팬)
+
+타임라인 리스트 인라인 편집(빠른 수정)
+
+더블클릭 → 간단 텍스트만 수정
+
+영상 오버레이에서 편집 진입
+
+더블클릭 시 텍스트 에디터로 포커스 이동
+
+4-2. 텍스트 에디터 MVP 구현
+
+초기엔 textarea 기반(selectionStart/End 사용)
+
+장점: 안정/단순/Undo 연동 쉬움
+
+이후 필요하면 contenteditable로 업그레이드
+
+5) 스팬(부분효과) 적용 알고리즘(필수 규칙)
+5-1. 목표
+
+사용자가 텍스트에서 [selStart, selEnd) 드래그 선택 후
+
+“굵게/색/프리셋/효과” 적용
+
+기존 스팬과 겹쳐도 깨끗하게 분할/병합
+
+5-2. 핵심 처리 단계
+
+기존 spans를 선택 경계로 split
+
+선택 구간에 걸치는 spans에 stylePatch를 merge(set/unset)
+
+결과에서 빈 패치는 span 제거
+
+인접 span 중 style/effects 동일하면 merge
+
+5-3. 스타일 patch 정책
+
+MVP는 set/unset만 제공
+
+toggle은 나중에
+
+5-4. 텍스트 변경 시 span 유지
+
+MVP: “편집 확정(Apply)” 시 diff 계산 후 span 인덱스 보정
+
+고급: 실시간 diff 반영(후순위)
+
+6) 타임라인 편집 기능(필수)
+6-1. 분할(Split)
+
+재생 헤드 시간 t에서 cue를 2개로 분할
+
+옵션:
+
+텍스트도 커서 기준으로 분할
+
+또는 텍스트는 그대로 복제
+
+단축키: S
+
+6-2. 병합(Merge)
+
+선택한 cue들을 시간순으로 병합
+
+텍스트 결합 규칙 옵션:
+
+공백/줄바꿈/구분자
+
+spans는
+
+이어붙이기(고급)
+
+또는 단순 제거(간단) 옵션
+
+단축키: Ctrl+M
+
+6-3. 제거(Delete)
+
+선택 cue 삭제
+단축키: Del
+
+6-4. 실행취소/다시실행(Undo/Redo)
+
+Command 기반 undo 스택 추천
+
+do()/undo()
+
+모든 변경(드래그 이동, 시간 변경, 스타일 적용, 텍스트 수정, split/merge/delete)을 Command로 감쌈
+
+단축키:
+
+Undo Ctrl+Z
+
+Redo Ctrl+Y 또는 Ctrl+Shift+Z
+
+7) 영상 프리뷰/오버레이(레이어 선택/이동)
+7-1. 좌표 저장 방식
+
+레이어 위치는 xNorm/yNorm(0~1 정규화)로 저장
+
+창 크기/해상도 바뀌어도 유지
+
+7-2. 선택(hit-test)
+
+오버레이 캔버스에서 클릭
+
+마우스 좌표 → 비디오 좌표 변환 → 각 트랙 bbox와 충돌 검사
+
+z-order(트랙 순서) 기준으로 가장 위 트랙 선택
+
+7-3. 드래그 이동
+
+선택한 트랙 드래그 → transform 업데이트
+
+스냅 옵션:
+
+안전영역, 중앙선, 다른 트랙과 정렬, 그리드
+
+7-4. 동시 표시
+
+트랙마다 다른 위치/정렬 설정 가능
+
+같은 시간에 여러 트랙 cue가 동시에 렌더됨
+
+8) 웨이브폼/재생 동기화
+8-1. 웨이브폼 peaks
+
+오디오에서 peaks 생성 후 캐시
+
+줌 레벨별 멀티 해상도 캐시(성능)
+
+8-2. 동기화
+
+video currentTime ↔ 타임라인 재생 헤드 ↔ 웨이브폼 스크럽
+
+스크럽/루프/재생/정지 지원
+
+9) “세세한 값 조절” UI(Inspector)
+9-1. Track(레이어) 탭
+
+Position X/Y (px/%)
+
+Anchor (9-grid)
+
+Font/Size/Weight
+
+Color/Alpha
+
+Outline thickness/color
+
+Shadow (blur/offset/alpha)
+
+Background box color/alpha
+
+Align (left/center/right)
+
+Safe area / snap 옵션
+
+Track effects 추가/순서 변경/활성 토글
+
+9-2. Cue(블록) 탭
+
+시작/끝 ms(스냅 포함)
+
+cue style override
+
+cue effects
+
+cue 위치 override(옵션)
+
+9-3. Span(부분) 탭/툴바
+
+선택 범위에 적용할 프리셋/색/굵게/밑줄/카라오케 등
+
+자주 쓰는 프리셋 즐겨찾기
+
+10) 패널(창) 시스템: 최소화/팝업/위치 변경
+10-1. 1차(권장): 앱 내부 도킹/플로팅 패널
+
+패널 상태:
+
+docked(left/right/bottom)
+
+floating(rect, z)
+
+minimized
+
+기능:
+
+각 패널 헤더: 최소화 / 도킹↔플로팅 / 닫기
+
+플로팅 패널 드래그 이동, 리사이즈
+
+레이아웃 저장/복원
+
+패널 예:
+
+Player
+
+Timeline
+
+Text Editor
+
+Inspector
+
+Preset/Plugin Browser
+
+10-2. 2차(후순위): 진짜 멀티 윈도우
+
+Tauri 멀티윈도우는 난이도↑이므로 옵션으로
+
+11) 플러그인(효과/프리셋 공유 파일)
+11-1. 플러그인 파일 개념(데이터 플러그인)
+
+코드 실행형 플러그인 X (보안/호환성 이슈)
+
+JSON 기반 “프리셋/효과 팩”만 허용
+
+확장자 예:
+
+.yttfx.json
+
+11-2. 플러그인 내용
+
+meta: id, name, author, version, license, description
+
+styles: 스타일 프리셋 목록
+
+effects: 효과 프리셋 목록(파라미터)
+
+tagMappings: <c.preset:...> 같은 호출 태그 매핑(옵션)
+
+11-3. 설치/불러오기 UX
+
+파일 선택 → 스키마 검증 → 설치
+
+충돌 처리:
+
+same id: 업데이트/복제
+
+same name: 자동 rename
+
+11-4. 저장 위치
+
+기본: 사용자 AppData
+
+포터블 모드: exe 옆 data/plugins
+
+12) 저장/출력(ASS + YTT/SRV3)
+12-1. 프로젝트 저장(내부 포맷)
+
+.yttproj 같은 전용 포맷(JSON or zip+json)
+
+포함:
+
+media 경로
+
+tracks/cues/spans
+
+설치된 플러그인 참조(또는 내장 복제 옵션)
+
+패널 레이아웃
+
+12-2. ASS Export(연출 보존)
+
+트랙 transform/스타일/스팬을 ASS 스타일+override 태그로 매핑
+
+가능한 범위 최대:
+
+pos/org/rotation/scale
+
+outline/shadow/color
+
+일부 애니메이션은 \t로
+
+12-3. YTT/SRV3 Export(유튜브 업로드용, 최대 보존)
+
+핵심은 “YTT 가능한 표현”을 최대 활용 + 불가한 건 근사
+
+YTT 컨버터(컴파일러) 규칙
+
+지원 가능 속성 subset 정의(색/투명/폰트/크기/외곽선/그림자/배경/정렬/위치/카라오케/루비 등)
+
+마스터 연출(특히 애니메이션)은:
+
+가능: 직접 변환
+
+불가: 시간 샘플링(50~200ms) + cue 분할로 근사
+
+결과 파일 크기/분할 수를 제한(안정성)
+
+미지원 효과는:
+
+무시 / 대체 / 경고 중 선택
+
+Export 옵션(필수)
+
+품질 우선(50ms)
+
+균형(100ms)
+
+용량 우선(200ms)
+
+검증기(필수)
+
+과도한 분할
+
+겹침 과다(트랙끼리)
+
+미지원 속성 사용
+→ 경고 표시 + 자동 완화 옵션
+
+13) 개발 로드맵(단계별 구현)
+Phase 1: 핵심 편집기 뼈대(MVP)
+
+프로젝트 로드/저장(.yttproj)
+
+비디오 플레이어 + 재생헤드 + 스크럽
+
+웨이브폼 기본 표시
+
+트랙 1개 + cue 생성/이동/리사이즈
+
+삭제/분할/병합
+
+Undo/Redo
+
+Phase 2: 텍스트 편집 + 부분효과(스팬)
+
+우측 텍스트 에디터(textarea)
+
+선택 범위에 스타일 적용
+
+스팬 분할/병합 알고리즘 적용
+
+span 렌더(프리뷰)
+
+Phase 3: 오버레이 선택/드래그 + 멀티 트랙
+
+영상 위 hit-test
+
+레이어 위치 드래그/스냅
+
+트랙 추가/순서/가시성
+
+한 시점에 여러 트랙 동시 표시
+
+Phase 4: Inspector 세세값 + 프리셋
+
+색/투명/외곽선/그림자/배경/폰트/정렬
+
+프리셋 적용/저장(내장)
+
+Phase 5: 패널 시스템(도킹/플로팅/최소화)
+
+패널 상태 저장/복원
+
+플로팅 이동/리사이즈
+
+최소화/탭
+
+Phase 6: 플러그인(공유) + Exporter
+
+플러그인 JSON 설치/내보내기
+
+ASS Export v1
+
+YTT/SRV3 Export v1(지원 subset + 분할 샘플링)
+
+Export 검증기/경고
+
+Phase 7: 품질 고도화
+
+peaks 멀티해상도 캐시
+
+텍스트 diff 기반 span 안정화
+
+더 많은 YTT 태그/효과 지원
+
+템플릿/프리셋 확장
+
+1) 플러그인 미리보기 UX 설계
+A. 플러그인 브라우저(관리 화면)
+
+플러그인 목록(내장/설치됨)
+
+클릭하면 오른쪽에:
+
+메타(이름/버전/제작자/라이선스)
+
+프리셋/효과 리스트
+
+미리보기 카드(즉시 렌더)
+
+B. 적용 전 미리보기(텍스트/레이어 기준)
+
+미리보기 텍스트 입력 박스(예: “안녕하세요 Hello 123”)
+
+드롭다운:
+
+적용 대상: 레이어 전체 / 큐 전체 / 선택 스팬
+
+위치/정렬/배경 등 기본값 선택
+
+“Apply to selection” 버튼(실제 cue에 적용)
+
+C. 영상 위 미리보기(선택)
+
+현재 영상 프레임 위에 “가상 cue”로 잠깐 올려보기
+
+적용 전/후 토글
+
+2) “미리보기 엔진”은 어떻게 구현할까?
+
+핵심은 플러그인이 ‘데이터’(스타일/효과 정의)라서,
+미리보기는 결국 “이 데이터로 렌더러를 한 번 돌려보기”야.
+
+방법 1) 가장 추천: 앱의 OverlayCanvas 렌더러를 그대로 사용
+
+미리보기용 “가짜 cue”를 생성
+
+플러그인 preset/effect를 적용한 뒤
+
+같은 렌더 함수로 Canvas에 그림
+
+장점:
+
+실제 앱에서 보이는 결과와 100% 동일
+
+구현이 제일 단순
+
+3) 애니메이션/시간 효과 미리보기(Shake, Pop 같은 것)
+
+효과 프리셋이 “시간에 따라 변하는” 타입이면:
+
+미리보기 카드 안에 작은 재생 컨트롤(▶/⏸, 루프)
+
+내부적으로:
+
+requestAnimationFrame로 t 증가
+
+evaluateEffect(effect, t)로 변형값 계산
+
+다시 렌더
+
+추가로 좋은 UX:
+
+“속도 0.5x / 1x / 2x”
+
+“0~2초 루프”
+
+4) YTT/ASS 호환 미리보기(아주 유용)
+
+너는 “ASS 저장 + YTT 컨버터 저장”을 같이 할 거라서,
+미리보기에 호환 모드를 넣으면 사용자가 실수 안 함.
+
+미리보기 모드 3개:
+
+Master(풀표현): 앱 내부 표현 그대로
+
+YTT 모드: YTT로 내보낼 때 가능한 표현만 표시(근사/샘플링 반영)
+
+ASS 모드: ASS로 내보냈을 때 표현
+
+플러그인 프리셋/효과 옆에:
+
+✅ YTT 완전 지원
+
+⚠️ YTT 근사(분할/샘플링)
+
+❌ YTT 불가
+뱃지 표시 + “YTT 모드에서 어떻게 보이는지” 즉시 확인 가능
+
+5) 플러그인 파일에 미리보기 메타를 넣는 옵션(공유에 도움됨)
+
+플러그인 JSON에 이런 필드를 optional로 추가:
+
+previewSamples:
+
+텍스트 샘플 여러 개
+
+권장 폰트/크기
+
+배경 색(가독성)
+
+추천 위치(상단/하단)
+
+이러면 다른 사람이 불러왔을 때 “제작자가 의도한 미리보기”가 자동으로 보임.
+
+6) 구현 체크리스트(바로 작업 단위)
+
+PluginBrowser UI + preset 리스트
+
+PreviewCard(Canvas) 컴포넌트
+
+buildPreviewCue(presetId/effectId, sampleText)
+
+애니메이션 루프(선택)
+
+호환 모드 토글(Master/YTT/ASS)
+
+
+
+구현 플랜 업데이트: 키프레임 트랙 시스템 포함
+1) 키프레임 개념/적용 범위
+1-1. 적용 레벨(3단)
+
+Track(레이어): 레이어 전체 위치/스타일/이펙트
+
+Cue(자막 블록): 특정 자막 블록만 애니메이션/연출
+
+Span(부분 선택): 특정 단어/구간(선택 구현, 난이도↑)
+
+MVP 우선순위: Cue → Track → Span
+
+1-2. 애니메이션 가능한 속성(초기 세트)
+
+Transform: position(xNorm,yNorm), scale, (ASS용) rotation
+
+Style: alpha, color, outline, shadow, boxAlpha 등
+
+Effect params: shake.amp, shake.freq, pop.strength…
+
+각 속성은 “키프레임 트랙”을 가질 수 있음.
+
+2) 데이터 모델 확장(키프레임 트랙)
+2-1. 공통 타입
+
+ParamPath: "track.transform.position", "cue.style.alpha", "cue.effect.shake.amp" 같은 문자열 경로
+
+Keyframe<T>:
+
+id
+
+tMs (시간)
+
+value: T
+
+interp: "linear" | "easeIn" | "easeOut" | "easeInOut" | "hold"
+
+(고급) bezier?: {x1,y1,x2,y2}
+
+KeyframeTrack<T>:
+
+param: ParamPath
+
+targetId: trackId 또는 cueId 또는 spanRef
+
+defaultValue: T
+
+keyframes: Keyframe<T>[] (tMs 오름차순)
+
+enabled: boolean
+
+2-2. 저장 위치
+
+Track:
+
+track.animTracks: KeyframeTrack[]
+
+Cue:
+
+cue.animTracks: KeyframeTrack[]
+
+Span(선택):
+
+span.animTracks?: KeyframeTrack[]
+
+“효과 속도/위치 속도 조절”은 결국 tMs와 interp로 해결됨.
+
+3) 평가 엔진(프리뷰 렌더용)
+3-1. evaluate(t)
+
+현재 재생 시간 tMs에서
+
+Track 기본값 → Track keyframe 적용
+
+Cue 기본값 → Cue keyframe 적용
+
+Span 기본값 → Span keyframe 적용(있으면)
+결과로 최종 렌더 값 계산
+
+3-2. 보간 규칙
+
+키프레임이 0개: defaultValue
+
+1개: 그 값 유지
+
+2개 이상:
+
+t가 두 키프레임 사이면 interp로 보간
+
+hold면 이전 값 유지
+
+4) 키프레임 트랙 UI(타임라인) 설계
+4-1. 타임라인 레이아웃
+
+Track row(큐 블록들) 아래에 펼칠 수 있는 “키프레임 레인(lane)”
+
+예: Position, Alpha, Shake Amp…
+
+레인 안에 “키프레임 점(●)”들이 시간 위치에 표시됨
+
+4-2. 기본 조작
+
+키프레임 추가
+
+재생헤드 위치에서 + 버튼
+
+또는 lane 더블클릭
+
+키프레임 이동
+
+점 드래그로 tMs 변경(스냅 적용)
+
+키프레임 값 수정
+
+점 선택 → Inspector에서 value 입력(슬라이더/숫자)
+
+키프레임 선택
+
+클릭: 단일
+
+Shift+클릭: 다중 선택(선택 구현)
+
+삭제(필수)
+
+선택된 키프레임을 Del 키로 삭제
+
+초기화(필수)
+
+lane 옆에 Reset(초기화) 버튼
+
+Reset 동작 옵션:
+
+해당 트랙의 keyframes 전부 삭제 + defaultValue로 복귀
+
+(선택) 현재 값 = defaultValue로 한 번 강제 세팅
+
+4-3. 단축키(필수 포함)
+
+Del: 선택된 키프레임 삭제
+
+Ctrl+Z / Ctrl+Y: undo/redo
+
+S: cue split(기존 기능 유지)
+
+(추천) K: 현재 파라미터에 키프레임 추가(선택된 lane 기준)
+
+5) Inspector(세세한 값 조절 + 키프레임 연동)
+5-1. Inspector 구성
+
+탭: Track / Cue / Span / Keyframes
+
+“현재 선택된 키프레임”이 있으면:
+
+param 이름 표시
+
+tMs 표시(입력 가능)
+
+value 편집(숫자/슬라이더/컬러피커)
+
+interp 선택(dropdown)
+
+[Reset Track] 버튼(= keyframes 전체 초기화)
+
+5-2. 값 조절 UX(프리미어 느낌)
+
+수치 옆에:
+
+입력 박스
+
+슬라이더(가능한 값)
+
+작은 Reset 아이콘 버튼(해당 파라미터만 default로)
+
+“현재 재생 시점 t”에서 값 변경 시:
+
+키프레임 자동 생성 옵션(토글)
+
+켜짐: 값 바꾸면 현재 t에 keyframe 생성/갱신
+
+꺼짐: 그냥 default/override만 바뀜
+
+6) Undo/Redo(키프레임 포함)
+
+키프레임 관련 모든 작업을 Command로:
+
+AddKeyframeCommand
+
+MoveKeyframeCommand
+
+DeleteKeyframesCommand
+
+UpdateKeyframeValueCommand
+
+ResetKeyframeTrackCommand
+
+Del 삭제도 반드시 undo 가능해야 함.
+
+7) 멀티 패널(도킹/플로팅/최소화)와 키프레임 트랙의 연결
+
+Timeline 패널(키프레임 레인 포함)은
+
+docked/floating/minimized 모두 가능
+
+Inspector 패널도 동일
+
+“키프레임 선택”은 앱 전체 상태로 저장:
+
+selectedKeyframeIds
+
+selectedParamTrackId
+
+8) YTT/SRV3 Export에서 키프레임 처리(컨버터 연동)
+
+YTT는 자유도가 제한되므로:
+
+YTT 지원되는 파라미터(색/투명/위치 등)는
+
+keyframes → 시간 샘플링 후 cue 분할로 근사(필요 시)
+
+미지원 파라미터(회전 등)는
+
+경고 + 제외/대체 옵션
+
+Export 옵션에:
+
+샘플링 간격(50/100/200ms)
+
+최대 분할 수 제한
+
+근사 허용 토글
+
+9) 구현 로드맵에 키프레임 반영
+Phase 1~2(기존 MVP)
+
+cue 편집 + undo/redo + span 적용
+
+Phase 3(키프레임 MVP)
+
+KeyframeTrack 데이터 모델
+
+Timeline에 1~2개 lane(예: Position, Alpha)
+
+점 추가/이동/Del 삭제/Reset
+
+Inspector 값 편집 + interp
+
+Phase 4+
+
+더 많은 파라미터/이펙트 트랙 확장
+
+다중 선택, 박스 선택, 그래프 에디터(후순위)
+
+10) “Reset(초기화) 버튼” 동작 정의(명확히)
+
+너가 말한 “초기화 버튼”을 2개 레벨로 두면 편함:
+
+파라미터 Reset(슬라이더 옆 작은 버튼)
+
+현재 선택된 param을 defaultValue로 되돌림
+
+(키프레임 자동 생성 ON이면 현재 t에 keyframe으로 기록)
+
+트랙 Reset(lane 옆 버튼) ✅ 요구사항
+
+해당 KeyframeTrack의 keyframes 전부 삭제
+
+값은 defaultValue로 복귀
+
+undo 가능
