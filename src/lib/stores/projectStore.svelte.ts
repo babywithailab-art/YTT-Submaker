@@ -301,6 +301,113 @@ export class ProjectStore {
         }
         return target.animTracks.some(a => a.paramPath === paramPath);
     }
+
+    addEffect(trackId: string, type: string, params: Record<string, any> = {}, cueId?: string): any {
+        const track = this.project.tracks.find(t => t.id === trackId);
+        if (!track) return null;
+
+        let target = cueId ? track.cues.find(c => c.id === cueId) : track;
+        if (!target) return null;
+
+        const effect = {
+            id: crypto.randomUUID(),
+            type,
+            params
+        };
+
+        const targetWithEffects = cueId ? (target as Cue) : (target as Track);
+        const effectsField = cueId ? 'effects' : 'trackEffects';
+        (targetWithEffects as any)[effectsField].push(effect);
+
+        // Auto-add default keyframes for In/Out effects if it's a cue effect
+        if (cueId) {
+            const cue = target as Cue;
+            const transitionMs = 500;
+
+            if (type.endsWith('-in')) {
+                const endT = Math.min(cue.startMs + transitionMs, cue.endMs);
+                if (type === 'fade-in') {
+                    const p = `effects.${effect.id}.alpha`;
+                    this.addKeyframe(trackId, p, { id: crypto.randomUUID(), tMs: cue.startMs, value: 0, interp: 'linear' }, cueId);
+                    this.addKeyframe(trackId, p, { id: crypto.randomUUID(), tMs: endT, value: 1, interp: 'linear' }, cueId);
+                } else if (type === 'slide-in') {
+                    const py = `effects.${effect.id}.y`;
+                    this.addKeyframe(trackId, py, { id: crypto.randomUUID(), tMs: cue.startMs, value: 100, interp: 'linear' }, cueId);
+                    this.addKeyframe(trackId, py, { id: crypto.randomUUID(), tMs: endT, value: 0, interp: 'linear' }, cueId);
+                } else if (type === 'zoom-in') {
+                    const ps = `effects.${effect.id}.scale`;
+                    this.addKeyframe(trackId, ps, { id: crypto.randomUUID(), tMs: cue.startMs, value: 0, interp: 'linear' }, cueId);
+                    this.addKeyframe(trackId, ps, { id: crypto.randomUUID(), tMs: endT, value: 1, interp: 'linear' }, cueId);
+                } else if (type === 'blur-in') {
+                    const pr = `effects.${effect.id}.radius`;
+                    this.addKeyframe(trackId, pr, { id: crypto.randomUUID(), tMs: cue.startMs, value: 20, interp: 'linear' }, cueId);
+                    this.addKeyframe(trackId, pr, { id: crypto.randomUUID(), tMs: endT, value: 0, interp: 'linear' }, cueId);
+                }
+            } else if (type.endsWith('-out')) {
+                const startT = Math.max(cue.startMs, cue.endMs - transitionMs);
+                if (type === 'fade-out') {
+                    const p = `effects.${effect.id}.alpha`;
+                    this.addKeyframe(trackId, p, { id: crypto.randomUUID(), tMs: startT, value: 1, interp: 'linear' }, cueId);
+                    this.addKeyframe(trackId, p, { id: crypto.randomUUID(), tMs: cue.endMs, value: 0, interp: 'linear' }, cueId);
+                } else if (type === 'slide-out') {
+                    const py = `effects.${effect.id}.y`;
+                    this.addKeyframe(trackId, py, { id: crypto.randomUUID(), tMs: startT, value: 0, interp: 'linear' }, cueId);
+                    this.addKeyframe(trackId, py, { id: crypto.randomUUID(), tMs: cue.endMs, value: 100, interp: 'linear' }, cueId);
+                } else if (type === 'zoom-out') {
+                    const ps = `effects.${effect.id}.scale`;
+                    this.addKeyframe(trackId, ps, { id: crypto.randomUUID(), tMs: startT, value: 1, interp: 'linear' }, cueId);
+                    this.addKeyframe(trackId, ps, { id: crypto.randomUUID(), tMs: cue.endMs, value: 0, interp: 'linear' }, cueId);
+                } else if (type === 'blur-out') {
+                    const pr = `effects.${effect.id}.radius`;
+                    this.addKeyframe(trackId, pr, { id: crypto.randomUUID(), tMs: startT, value: 0, interp: 'linear' }, cueId);
+                    this.addKeyframe(trackId, pr, { id: crypto.randomUUID(), tMs: cue.endMs, value: 20, interp: 'linear' }, cueId);
+                }
+            }
+        }
+
+        this.project.updatedAt = new Date().toISOString();
+        return effect;
+    }
+
+    removeEffect(trackId: string, effectId: string, cueId?: string) {
+        const track = this.project.tracks.find(t => t.id === trackId);
+        if (!track) return;
+
+        let target = cueId ? track.cues.find(c => c.id === cueId) : track;
+        if (!target) return;
+
+        const effectsField = cueId ? 'effects' : 'trackEffects';
+        (target as any)[effectsField] = (target as any)[effectsField].filter((e: any) => e.id !== effectId);
+
+        this.project.updatedAt = new Date().toISOString();
+    }
+
+    updateEffect(trackId: string, effectId: string, updates: Partial<Record<string, any>>, cueId?: string) {
+        const track = this.project.tracks.find(t => t.id === trackId);
+        if (!track) return;
+
+        let target = cueId ? track.cues.find(c => c.id === cueId) : track;
+        if (!target) return;
+
+        const effectsField = cueId ? 'effects' : 'trackEffects';
+        const effect = (target as any)[effectsField].find((e: any) => e.id === effectId);
+        if (effect) {
+            effect.params = { ...effect.params, ...updates };
+            this.project.updatedAt = new Date().toISOString();
+        }
+    }
+
+    restoreEffect(trackId: string, effect: any, cueId?: string) {
+        const track = this.project.tracks.find(t => t.id === trackId);
+        if (!track) return;
+
+        let target = cueId ? track.cues.find(c => c.id === cueId) : track;
+        if (!target) return;
+
+        const effectsField = cueId ? 'effects' : 'trackEffects';
+        (target as any)[effectsField].push(effect);
+        this.project.updatedAt = new Date().toISOString();
+    }
 }
 
 export const projectStore = new ProjectStore();

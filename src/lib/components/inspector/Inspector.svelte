@@ -1,4 +1,6 @@
 <script lang="ts">
+    import { dndzone } from "svelte-dnd-action";
+    import { flip } from "svelte/animate";
     import { projectStore } from "$lib/stores/projectStore.svelte";
     import {
         commandManager,
@@ -16,7 +18,15 @@
         UpdateCueStyleCommand,
         UpdateCuePositionCommand,
         UpdateKeyframeTimeCommand,
+        AddEffectCommand,
+        RemoveEffectCommand,
+        UpdateEffectParamCommand,
+        ToggleSpanStyleCommand,
+        ApplyAnimationPresetCommand,
+        ReorderEffectsCommand,
     } from "$lib/engine/command.svelte";
+    import { presetStore } from "$lib/stores/presetStore.svelte";
+    import { effectRegistry } from "$lib/engine/effects";
     import { interpolate } from "$lib/utils/animation";
     import type { StyleProps, Track, Cue } from "$lib/types";
     import {
@@ -33,8 +43,28 @@
         Plus,
         Settings,
         Trash2,
+        Save,
         X,
+        AlignLeft,
+        AlignCenter,
+        AlignRight,
+        Type,
     } from "lucide-svelte";
+
+    const FONTS = [
+        "Carrois Gothic SC",
+        "Comic Sans MS",
+        "Courier New",
+        "Lucida Console",
+        "Monotype Corsiva",
+        "Roboto",
+        "Times New Roman",
+        "바탕",
+        "맑은 고딕",
+        "궁서",
+        "돋움",
+        "굴림",
+    ];
 
     let selectedData = $derived.by(() => {
         if (!projectStore.project || projectStore.selectedCueIds.size === 0)
@@ -47,28 +77,59 @@
         return null;
     });
 
-    let activeTab = $state("inspector"); // inspector | keyframe | effect
+    let activeTab = $state("inspector"); // inspector | keyframe | effect | color-effect
+    const COLOR_EFFECTS = ["neon", "rainbow", "gradient"];
     let activeEdgeTab = $state<"outline" | "shadow" | "glow" | "bevel">(
         "outline",
     );
     let originalText = "";
     let selectionStart = $state(0);
     let selectionEnd = $state(0);
+    let selectedPresetId = $state("");
+    let editingEffectId = $state<string | null>(null);
+    let showFontMenu = $state(false);
 
     function handleTextFocus() {
-        if (selectedData) originalText = selectedData.cue.plainText;
+        if (selectedData) originalText = selectedData!.cue.plainText;
     }
 
     function handleTextBlur() {
-        if (selectedData && originalText !== selectedData.cue.plainText) {
+        if (selectedData && originalText !== selectedData!.cue.plainText) {
             commandManager.execute(
                 new TextChangeCommand(
-                    selectedData.trackId,
-                    selectedData.cue.id,
+                    selectedData!.trackId,
+                    selectedData!.cue.id,
                     originalText,
-                    selectedData.cue.plainText,
+                    selectedData!.cue.plainText,
                 ),
             );
+        }
+    }
+
+    function saveAnimationPreset() {
+        if (!selectedData) return;
+        const name = prompt("Enter preset name:");
+        if (!name) return;
+
+        // Relative rebase: keyframes are stored relative to 0ms (cue start)
+        const relTracks = selectedData.cue.animTracks.map((track) => ({
+            ...track,
+            keyframes: track.keyframes.map((kf) => ({
+                ...kf,
+                tMs: kf.tMs - selectedData!.cue.startMs,
+            })),
+        }));
+
+        presetStore.savePreset(name, relTracks, selectedData.cue.effects || []);
+    }
+
+    function deleteAnimationPreset() {
+        if (!selectedPresetId) return;
+        const p = presetStore.presets.find((x) => x.id === selectedPresetId);
+        if (!p) return;
+        if (confirm(`Delete preset "${p.name}"?`)) {
+            presetStore.deletePreset(selectedPresetId);
+            selectedPresetId = "";
         }
     }
 
@@ -77,13 +138,34 @@
         const start = Math.min(selectionStart, selectionEnd);
         const end = Math.max(selectionStart, selectionEnd);
 
+        if (start === end) return; // No selection
+
         commandManager.execute(
             new AddSpanCommand(
-                selectedData.trackId,
-                selectedData.cue.id,
+                selectedData!.trackId,
+                selectedData!.cue.id,
                 start,
                 end,
                 style,
+            ),
+        );
+    }
+
+    function toggleStyle(prop: keyof StyleProps, val: any = true) {
+        if (!selectedData) return;
+        const start = Math.min(selectionStart, selectionEnd);
+        const end = Math.max(selectionStart, selectionEnd);
+
+        if (start === end && prop !== "align") return; // No selection, unless it's alignment
+
+        commandManager.execute(
+            new ToggleSpanStyleCommand(
+                selectedData!.trackId,
+                selectedData!.cue.id,
+                start,
+                end,
+                prop,
+                val,
             ),
         );
     }
@@ -92,8 +174,8 @@
         if (!selectedData) return;
         commandManager.execute(
             new SplitCueCommand(
-                selectedData.trackId,
-                selectedData.cue.id,
+                selectedData!.trackId,
+                selectedData!.cue.id,
                 projectStore.currentTime,
             ),
         );
@@ -102,16 +184,16 @@
     function mergeNext() {
         if (!selectedData) return;
         const track = projectStore.project?.tracks.find(
-            (t) => t.id === selectedData.trackId,
+            (t) => t.id === selectedData!.trackId,
         );
         if (!track) return;
-        const idx = track.cues.findIndex((c) => c.id === selectedData.cue.id);
+        const idx = track.cues.findIndex((c) => c.id === selectedData!.cue.id);
         if (idx === -1 || idx === track.cues.length - 1) return;
         const nextCue = track.cues[idx + 1];
         commandManager.execute(
             new MergeCuesCommand(
-                selectedData.trackId,
-                selectedData.cue.id,
+                selectedData!.trackId,
+                selectedData!.cue.id,
                 nextCue.id,
             ),
         );
@@ -278,14 +360,69 @@
         window.removeEventListener("mouseup", handlePopupMouseUp);
     }
 
+    // --- Drag and Drop for Effects (svelte-dnd-action) ---
+    let currentActiveEffects = $state<any[]>([]);
+    let currentColorEffects = $state<any[]>([]);
+
+    // Sync with store
+    $effect(() => {
+        if (selectedData?.cue?.effects) {
+            currentActiveEffects = selectedData.cue.effects.filter(
+                (e) => !COLOR_EFFECTS.includes(e.type),
+            );
+            currentColorEffects = selectedData.cue.effects.filter((e) =>
+                COLOR_EFFECTS.includes(e.type),
+            );
+        } else {
+            currentActiveEffects = [];
+            currentColorEffects = [];
+        }
+    });
+
+    function handleActiveConsider(e: CustomEvent<any>) {
+        currentActiveEffects = e.detail.items;
+    }
+
+    function handleActiveFinalize(e: CustomEvent<any>) {
+        currentActiveEffects = e.detail.items;
+        if (!selectedData) return;
+
+        const newEffects = [...currentActiveEffects, ...currentColorEffects];
+        commandManager.execute(
+            new ReorderEffectsCommand(
+                selectedData.trackId,
+                selectedData.cue.id,
+                newEffects,
+            ),
+        );
+    }
+
+    function handleColorConsider(e: CustomEvent<any>) {
+        currentColorEffects = e.detail.items;
+    }
+
+    function handleColorFinalize(e: CustomEvent<any>) {
+        currentColorEffects = e.detail.items;
+        if (!selectedData) return;
+
+        const newEffects = [...currentActiveEffects, ...currentColorEffects];
+        commandManager.execute(
+            new ReorderEffectsCommand(
+                selectedData.trackId,
+                selectedData.cue.id,
+                newEffects,
+            ),
+        );
+    }
+
     function handleKeyframeTickMouseDown(e: MouseEvent, anim: any, kf: any) {
         e.stopPropagation();
         if (!selectedData) return;
 
         const startX = e.clientX;
         const initialTMs = kf.tMs;
-        const cueStart = selectedData.cue.startMs;
-        const cueEnd = selectedData.cue.endMs;
+        const cueStart = selectedData!.cue.startMs;
+        const cueEnd = selectedData!.cue.endMs;
         const duration = cueEnd - cueStart;
         const timelineWidth = (
             e.currentTarget as HTMLElement
@@ -319,11 +456,11 @@
             if (finalT !== initialTMs) {
                 commandManager.execute(
                     new UpdateKeyframeTimeCommand(
-                        selectedData.trackId,
+                        selectedData!.trackId,
                         anim.paramPath,
                         initialTMs,
                         finalT,
-                        selectedData.cue.id,
+                        selectedData!.cue.id,
                     ),
                 );
             }
@@ -336,11 +473,316 @@
     function getActiveEdges(style: any): string[] {
         if (style.edgeTypes && style.edgeTypes.length > 0)
             return style.edgeTypes;
-        if (style.edgeType && style.edgeType !== "none")
-            return [style.edgeType];
         return [];
     }
+
+    function deletePreset(id: string) {
+        if (!id) return;
+        const preset = presetStore.presets.find((p) => p.id === id);
+        if (!preset) return;
+        if (confirm(`Delete preset "${preset.name}"?`)) {
+            presetStore.deletePreset(id);
+            selectedPresetId = "";
+        }
+    }
 </script>
+
+{#snippet styleContent()}
+    {#if selectedData}
+        {@const isTrack = popupType === "track"}
+        {@const currentStyle = isTrack
+            ? selectedData.track.defaultStyle
+            : selectedData.cue.styleOverride || {}}
+        {@const updateFn = (s: any) => {
+            if (isTrack) {
+                commandManager.execute(
+                    new UpdateTrackStyleCommand(selectedData!.trackId, s),
+                );
+            } else {
+                commandManager.execute(
+                    new UpdateCueStyleCommand(
+                        selectedData!.trackId,
+                        selectedData!.cue.id,
+                        s,
+                    ),
+                );
+            }
+        }}
+
+        <section>
+            <h4>Background</h4>
+            <div class="popup-row">
+                <label>Box:</label>
+                <input
+                    type="checkbox"
+                    checked={!!currentStyle.backgroundColor}
+                    onchange={(e) =>
+                        updateFn({
+                            backgroundColor: (e.target as HTMLInputElement)
+                                .checked
+                                ? "#000000"
+                                : undefined,
+                        })}
+                />
+            </div>
+            {#if currentStyle.backgroundColor}
+                <div class="row">
+                    <label for="track-bg-color">Color:</label>
+                    <input
+                        id="track-bg-color"
+                        type="color"
+                        value={currentStyle.backgroundColor}
+                        onchange={(e) =>
+                            updateFn({
+                                backgroundColor: (e.target as HTMLInputElement)
+                                    .value,
+                            })}
+                    />
+                </div>
+                <div class="row">
+                    <label for="bg-radius">Corner Radius:</label>
+                    <input
+                        id="bg-radius"
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={currentStyle.borderRadius ?? 0}
+                        onchange={(e) =>
+                            updateFn({
+                                borderRadius: parseFloat(
+                                    (e.target as HTMLInputElement).value,
+                                ),
+                            })}
+                    />
+                    <span class="unit">px</span>
+                </div>
+            {/if}
+        </section>
+
+        <section>
+            <h4>Edge Effects</h4>
+            <div class="edge-tabs-container">
+                {#each ["outline", "shadow", "glow", "bevel"] as edge}
+                    {@const isActive =
+                        getActiveEdges(currentStyle).includes(edge)}
+                    <!-- svelte-ignore a11y_click_events_have_key_events -->
+                    <!-- svelte-ignore a11y_no_static_element_interactions -->
+                    <div
+                        class="edge-tab-item"
+                        class:active={activeEdgeTab === edge}
+                        onclick={() => (activeEdgeTab = edge as any)}
+                    >
+                        <input
+                            type="checkbox"
+                            checked={isActive}
+                            onclick={(e) => e.stopPropagation()}
+                            onchange={(e) => {
+                                const checked = (e.target as HTMLInputElement)
+                                    .checked;
+                                let types = new Set(
+                                    getActiveEdges(currentStyle),
+                                );
+                                if (checked) types.add(edge);
+                                else types.delete(edge);
+                                updateFn({
+                                    edgeTypes: Array.from(types),
+                                });
+                                if (checked) {
+                                    activeEdgeTab = edge as any;
+                                }
+                            }}
+                        />
+                        <span class="tab-label">
+                            {edge.charAt(0).toUpperCase() + edge.slice(1)}
+                        </span>
+                    </div>
+                {/each}
+            </div>
+
+            <div class="edge-content">
+                {#if activeEdgeTab === "outline"}
+                    <div class="popup-row">
+                        <label>Color:</label>
+                        <input
+                            type="color"
+                            value={currentStyle.outlineColor || "#000000"}
+                            onchange={(e) =>
+                                updateFn({
+                                    outlineColor: (e.target as HTMLInputElement)
+                                        .value,
+                                })}
+                        />
+                    </div>
+                    <div class="popup-row">
+                        <label>Width:</label>
+                        <input
+                            type="number"
+                            step="0.5"
+                            value={currentStyle.outlineWidth ?? 2}
+                            onchange={(e) =>
+                                updateFn({
+                                    outlineWidth: parseFloat(
+                                        (e.target as HTMLInputElement).value,
+                                    ),
+                                })}
+                        />
+                    </div>
+                {:else if activeEdgeTab === "shadow"}
+                    <div class="popup-row">
+                        <label>Color:</label>
+                        <input
+                            type="color"
+                            value={currentStyle.shadowColor || "#000000"}
+                            onchange={(e) =>
+                                updateFn({
+                                    shadowColor: (e.target as HTMLInputElement)
+                                        .value,
+                                })}
+                        />
+                    </div>
+                    <div class="popup-row">
+                        <label>Blur:</label>
+                        <input
+                            type="number"
+                            step="1"
+                            value={currentStyle.shadowBlur ?? 4}
+                            onchange={(e) =>
+                                updateFn({
+                                    shadowBlur: parseFloat(
+                                        (e.target as HTMLInputElement).value,
+                                    ),
+                                })}
+                        />
+                    </div>
+                    <div class="popup-row">
+                        <label>Off X:</label>
+                        <input
+                            type="number"
+                            step="1"
+                            value={currentStyle.shadowOffsetX ?? 2}
+                            onchange={(e) =>
+                                updateFn({
+                                    shadowOffsetX: parseFloat(
+                                        (e.target as HTMLInputElement).value,
+                                    ),
+                                })}
+                        />
+                    </div>
+                    <div class="popup-row">
+                        <label>Off Y:</label>
+                        <input
+                            type="number"
+                            step="1"
+                            value={currentStyle.shadowOffsetY ?? 2}
+                            onchange={(e) =>
+                                updateFn({
+                                    shadowOffsetY: parseFloat(
+                                        (e.target as HTMLInputElement).value,
+                                    ),
+                                })}
+                        />
+                    </div>
+                {:else if activeEdgeTab === "glow"}
+                    <div class="popup-row">
+                        <label>Color:</label>
+                        <input
+                            type="color"
+                            value={currentStyle.edgeEffects?.glow?.color ||
+                                "#FFFF00"}
+                            onchange={(e) => {
+                                const glow =
+                                    currentStyle.edgeEffects?.glow || {};
+                                updateFn({
+                                    edgeEffects: {
+                                        ...currentStyle.edgeEffects,
+                                        glow: {
+                                            ...glow,
+                                            color: (
+                                                e.target as HTMLInputElement
+                                            ).value,
+                                        },
+                                    },
+                                });
+                            }}
+                        />
+                    </div>
+                    <div class="popup-row">
+                        <label>Width:</label>
+                        <input
+                            type="number"
+                            step="1"
+                            value={currentStyle.edgeEffects?.glow?.width ?? 5}
+                            onchange={(e) => {
+                                const glow =
+                                    currentStyle.edgeEffects?.glow || {};
+                                updateFn({
+                                    edgeEffects: {
+                                        ...currentStyle.edgeEffects,
+                                        glow: {
+                                            ...glow,
+                                            width: parseFloat(
+                                                (e.target as HTMLInputElement)
+                                                    .value,
+                                            ),
+                                        },
+                                    },
+                                });
+                            }}
+                        />
+                    </div>
+                {:else if activeEdgeTab === "bevel"}
+                    <div class="popup-row">
+                        <label>Color:</label>
+                        <input
+                            type="color"
+                            value={currentStyle.edgeEffects?.bevel?.color ||
+                                "#FFFFFF"}
+                            onchange={(e) => {
+                                const bevel =
+                                    currentStyle.edgeEffects?.bevel || {};
+                                updateFn({
+                                    edgeEffects: {
+                                        ...currentStyle.edgeEffects,
+                                        bevel: {
+                                            ...bevel,
+                                            color: (
+                                                e.target as HTMLInputElement
+                                            ).value,
+                                        },
+                                    },
+                                });
+                            }}
+                        />
+                    </div>
+                    <div class="popup-row">
+                        <label>Width:</label>
+                        <input
+                            type="number"
+                            step="0.5"
+                            value={currentStyle.edgeEffects?.bevel?.width ?? 2}
+                            onchange={(e) => {
+                                const bevel =
+                                    currentStyle.edgeEffects?.bevel || {};
+                                updateFn({
+                                    edgeEffects: {
+                                        ...currentStyle.edgeEffects,
+                                        bevel: {
+                                            ...bevel,
+                                            width: parseFloat(
+                                                (e.target as HTMLInputElement)
+                                                    .value,
+                                            ),
+                                        },
+                                    },
+                                });
+                            }}
+                        />
+                    </div>
+                {/if}
+            </div>
+        </section>
+    {/if}
+{/snippet}
 
 <div class="inspector">
     <div class="tabs">
@@ -365,6 +807,14 @@
         >
             Effect
         </button>
+        <button
+            class="tab-btn"
+            class:active={activeTab === "color-effect"}
+            onclick={() => (activeTab = "color-effect")}
+        >
+            Color Effect
+        </button>
+
         {#if isStyleDocked}
             <div class="tab-btn style-tab" class:active={activeTab === "style"}>
                 <button
@@ -414,8 +864,8 @@
                                 if (!selectedData) return;
                                 commandManager.execute(
                                     new RemoveCueCommand(
-                                        selectedData.trackId,
-                                        selectedData.cue.id,
+                                        selectedData!.trackId,
+                                        selectedData!.cue.id,
                                     ),
                                 );
                                 projectStore.selectedCueIds = new Set();
@@ -428,31 +878,281 @@
                 </div>
 
                 <div class="row">
-                    <label for="cue-text">Text</label>
                     <div class="toolbar-mini">
+                        <div class="font-dropdown-container">
+                            <button
+                                class="font-btn"
+                                onclick={() => (showFontMenu = !showFontMenu)}
+                                title="Font Family"
+                            >
+                                <Type size={14} />
+                            </button>
+                            {#if showFontMenu}
+                                <div class="font-menu">
+                                    {#each FONTS as font}
+                                        <button
+                                            class="font-menu-item"
+                                            style:font-family={font}
+                                            onclick={() => {
+                                                toggleStyle("fontFamily", font);
+                                                showFontMenu = false;
+                                            }}
+                                        >
+                                            {font}
+                                        </button>
+                                    {/each}
+                                </div>
+                            {/if}
+                        </div>
+
                         <button
-                            onclick={() => addSpan({ fontWeight: "bold" })}
+                            class:active={(() => {
+                                if (
+                                    !selectedData ||
+                                    selectionStart === selectionEnd
+                                )
+                                    return false;
+                                const start = Math.min(
+                                    selectionStart,
+                                    selectionEnd,
+                                );
+                                const end = Math.max(
+                                    selectionStart,
+                                    selectionEnd,
+                                );
+                                const spans = selectedData.cue.spans.filter(
+                                    (s) =>
+                                        s.startChar < end && s.endChar > start,
+                                );
+                                for (let i = start; i < end; i++) {
+                                    const s = spans.find(
+                                        (sp) =>
+                                            i >= sp.startChar && i < sp.endChar,
+                                    );
+                                    if (!s || !s.stylePatch.fontWeight)
+                                        return false;
+                                }
+                                return true;
+                            })()}
+                            onclick={() => toggleStyle("fontWeight", "bold")}
                             title="Bold"
                         >
                             <Bold size={14} />
                         </button>
                         <button
-                            onclick={() => addSpan({ italic: true })}
+                            class:active={(() => {
+                                if (
+                                    !selectedData ||
+                                    selectionStart === selectionEnd
+                                )
+                                    return false;
+                                const start = Math.min(
+                                    selectionStart,
+                                    selectionEnd,
+                                );
+                                const end = Math.max(
+                                    selectionStart,
+                                    selectionEnd,
+                                );
+                                const spans = selectedData.cue.spans.filter(
+                                    (s) =>
+                                        s.startChar < end && s.endChar > start,
+                                );
+                                for (let i = start; i < end; i++) {
+                                    const s = spans.find(
+                                        (sp) =>
+                                            i >= sp.startChar && i < sp.endChar,
+                                    );
+                                    if (!s || !s.stylePatch.italic)
+                                        return false;
+                                }
+                                return true;
+                            })()}
+                            onclick={() => toggleStyle("italic")}
                             title="Italic"
                         >
                             <Italic size={14} />
                         </button>
                         <button
-                            onclick={() => addSpan({ underline: true })}
+                            class:active={false}
+                            onclick={() => {
+                                if (!selectedData) return;
+                                const spans = selectedData.cue.spans || [];
+                                const start = Math.min(
+                                    selectionStart,
+                                    selectionEnd,
+                                );
+                                const end = Math.max(
+                                    selectionStart,
+                                    selectionEnd,
+                                );
+
+                                // Pick current align from selection start or right before caret
+                                const targetChar =
+                                    start === end
+                                        ? Math.max(0, start - 1)
+                                        : start;
+                                const s = selectedData.cue.spans.find(
+                                    (sp) =>
+                                        targetChar >= sp.startChar &&
+                                        targetChar < sp.endChar,
+                                );
+                                const current = s?.stylePatch.align || "left";
+
+                                let next: "left" | "center" | "right" =
+                                    "center";
+                                if (current === "left") next = "center";
+                                else if (current === "center") next = "right";
+                                else next = "left";
+
+                                toggleStyle("align", next);
+                            }}
+                            title="Text Alignment (Left/Center/Right)"
+                        >
+                            {#key (() => {
+                                if (!selectedData) return "left";
+                                const start = Math.min(selectionStart, selectionEnd);
+                                const end = Math.max(selectionStart, selectionEnd);
+                                const targetChar = start === end ? Math.max(0, start - 1) : start;
+                                const s = selectedData.cue.spans.find((sp) => targetChar >= sp.startChar && targetChar < sp.endChar);
+                                return s?.stylePatch.align || "left";
+                            })()}
+                                {@const align = (() => {
+                                    if (!selectedData) return "left";
+                                    const start = Math.min(
+                                        selectionStart,
+                                        selectionEnd,
+                                    );
+                                    const end = Math.max(
+                                        selectionStart,
+                                        selectionEnd,
+                                    );
+                                    const targetChar =
+                                        start === end
+                                            ? Math.max(0, start - 1)
+                                            : start;
+                                    const s = selectedData.cue.spans.find(
+                                        (sp) =>
+                                            targetChar >= sp.startChar &&
+                                            targetChar < sp.endChar,
+                                    );
+                                    return s?.stylePatch.align || "left";
+                                })()}
+                                {#if align === "center"}
+                                    <AlignCenter size={14} />
+                                {:else if align === "right"}
+                                    <AlignRight size={14} />
+                                {:else}
+                                    <AlignLeft size={14} />
+                                {/if}
+                            {/key}
+                        </button>
+                        <button
+                            class:active={(() => {
+                                if (
+                                    !selectedData ||
+                                    selectionStart === selectionEnd
+                                )
+                                    return false;
+                                const start = Math.min(
+                                    selectionStart,
+                                    selectionEnd,
+                                );
+                                const end = Math.max(
+                                    selectionStart,
+                                    selectionEnd,
+                                );
+                                const spans = selectedData.cue.spans.filter(
+                                    (s) =>
+                                        s.startChar < end && s.endChar > start,
+                                );
+                                for (let i = start; i < end; i++) {
+                                    const s = spans.find(
+                                        (sp) =>
+                                            i >= sp.startChar && i < sp.endChar,
+                                    );
+                                    if (!s || !s.stylePatch.underline)
+                                        return false;
+                                }
+                                return true;
+                            })()}
+                            onclick={() => toggleStyle("underline")}
                             title="Underline"
                         >
                             <Underline size={14} />
                         </button>
                         <button
-                            onclick={() => addSpan({ lineThrough: true })}
+                            class:active={(() => {
+                                if (
+                                    !selectedData ||
+                                    selectionStart === selectionEnd
+                                )
+                                    return false;
+                                const start = Math.min(
+                                    selectionStart,
+                                    selectionEnd,
+                                );
+                                const end = Math.max(
+                                    selectionStart,
+                                    selectionEnd,
+                                );
+                                const spans = selectedData.cue.spans.filter(
+                                    (s) =>
+                                        s.startChar < end && s.endChar > start,
+                                );
+                                for (let i = start; i < end; i++) {
+                                    const s = spans.find(
+                                        (sp) =>
+                                            i >= sp.startChar && i < sp.endChar,
+                                    );
+                                    if (!s || !s.stylePatch.lineThrough)
+                                        return false;
+                                }
+                                return true;
+                            })()}
+                            onclick={() => toggleStyle("lineThrough")}
                             title="Strikeout"
                         >
                             <Strikethrough size={14} />
+                        </button>
+                        <button
+                            class:active={(() => {
+                                const spans = selectedData?.cue.spans || [];
+                                const start = Math.min(
+                                    selectionStart,
+                                    selectionEnd,
+                                );
+                                const end = Math.max(
+                                    selectionStart,
+                                    selectionEnd,
+                                );
+
+                                if (start === end) {
+                                    // If caret, check if inside a ruby span?
+                                    // Actually, ruby is usually entire cue or span-based.
+                                    // Let's make it span-based like others.
+                                    const s = spans.find(
+                                        (sp) =>
+                                            start >= sp.startChar &&
+                                            start < sp.endChar,
+                                    );
+                                    return s?.stylePatch.rubyEnabled || false;
+                                }
+
+                                // If selection, check if ALL chars in range have ruby
+                                // Rough check: check if we have any span with ruby in this range
+                                return spans.some(
+                                    (sp) =>
+                                        sp.startChar < end &&
+                                        sp.endChar > start &&
+                                        sp.stylePatch.rubyEnabled,
+                                );
+                            })()}
+                            onclick={() => toggleStyle("rubyEnabled")}
+                            title="Ruby (Furigana) [Base/Ruby]"
+                            style="font-family: serif; font-weight: bold; font-size: 14px;"
+                        >
+                            Rb
                         </button>
                         <div
                             class="color-input-wrapper"
@@ -468,14 +1168,14 @@
                                         // Auto-select all if nothing selected to ensure highlight priority
                                         selectionStart = 0;
                                         selectionEnd =
-                                            selectedData.cue.plainText.length;
+                                            selectedData!.cue.plainText.length;
                                     }
                                     addSpan({
                                         color: (e.target as HTMLInputElement)
                                             .value,
                                     });
                                 }}
-                                style="width: 28px; height: 28px; padding: 1px; cursor: pointer; border: 1px solid var(--border-light); background: var(--bg-header); border-radius: 4px;"
+                                style="width: 24px; height: 24px; padding: 0; cursor: pointer; border: 1px solid var(--border-light); background: var(--bg-header); border-radius: 4px;"
                             />
                         </div>
                         <button
@@ -487,7 +1187,7 @@
                     </div>
                     <textarea
                         id="cue-text"
-                        bind:value={selectedData.cue.plainText}
+                        bind:value={selectedData!.cue.plainText}
                         onfocus={handleTextFocus}
                         onblur={handleTextBlur}
                         onselect={(e) => {
@@ -518,7 +1218,7 @@
                             <input
                                 id="cue-start"
                                 type="number"
-                                value={selectedData.cue.startMs}
+                                value={selectedData!.cue.startMs}
                                 onchange={(e) => {
                                     const val = parseInt(
                                         (e.target as HTMLInputElement).value,
@@ -526,12 +1226,12 @@
                                     if (selectedData) {
                                         commandManager.execute(
                                             new TimeChangeCommand(
-                                                selectedData.trackId,
-                                                selectedData.cue.id,
-                                                selectedData.cue.startMs,
-                                                selectedData.cue.endMs,
+                                                selectedData!.trackId,
+                                                selectedData!.cue.id,
+                                                selectedData!.cue.startMs,
+                                                selectedData!.cue.endMs,
                                                 val,
-                                                selectedData.cue.endMs,
+                                                selectedData!.cue.endMs,
                                             ),
                                         );
                                     }
@@ -543,7 +1243,7 @@
                             <input
                                 id="cue-end"
                                 type="number"
-                                value={selectedData.cue.endMs}
+                                value={selectedData!.cue.endMs}
                                 onchange={(e) => {
                                     const val = parseInt(
                                         (e.target as HTMLInputElement).value,
@@ -551,11 +1251,11 @@
                                     if (selectedData) {
                                         commandManager.execute(
                                             new TimeChangeCommand(
-                                                selectedData.trackId,
-                                                selectedData.cue.id,
-                                                selectedData.cue.startMs,
-                                                selectedData.cue.endMs,
-                                                selectedData.cue.startMs,
+                                                selectedData!.trackId,
+                                                selectedData!.cue.id,
+                                                selectedData!.cue.startMs,
+                                                selectedData!.cue.endMs,
+                                                selectedData!.cue.startMs,
                                                 val,
                                             ),
                                         );
@@ -575,14 +1275,14 @@
                         {#each [{ label: "X (%)", key: "xNorm", scale: 100, defaultVal: 0.5 }, { label: "Y (%)", key: "yNorm", scale: 100, defaultVal: 0.5 }, { label: "Scale", key: "scale", scale: 1, defaultVal: 1 }, { label: "Rotation", key: "rotation", scale: 1, defaultVal: 0 }] as p}
                             {@const paramPath = `posOverride.${p.key}`}
                             {@const animTrack =
-                                selectedData.cue.animTracks.find(
+                                selectedData!.cue.animTracks.find(
                                     (a) => a.paramPath === paramPath,
                                 )}
                             {@const currentVal = getCueValueAt(
-                                selectedData.cue,
+                                selectedData!.cue,
                                 paramPath,
-                                selectedData.cue.posOverride?.[
-                                    p.key as keyof typeof selectedData.cue.posOverride
+                                (selectedData!.cue.posOverride as any)?.[
+                                    p.key
                                 ] ?? p.defaultVal,
                                 projectStore.currentTime,
                             )}
@@ -608,13 +1308,13 @@
                                                     ).value,
                                                 ) / p.scale;
                                             const pos = {
-                                                ...(selectedData.cue
+                                                ...(selectedData!.cue
                                                     .posOverride || {}),
                                             };
                                             (pos as any)[p.key] = val;
                                             projectStore.updateCue(
-                                                selectedData.trackId,
-                                                selectedData.cue.id,
+                                                selectedData!.trackId,
+                                                selectedData!.cue.id,
                                                 { posOverride: pos },
                                             );
 
@@ -622,17 +1322,17 @@
                                                 if (hasKeyframe) {
                                                     commandManager.execute(
                                                         new UpdateKeyframeValueCommand(
-                                                            selectedData.trackId,
+                                                            selectedData!.trackId,
                                                             paramPath,
                                                             projectStore.currentTime,
                                                             val,
-                                                            selectedData.cue.id,
+                                                            selectedData!.cue.id,
                                                         ),
                                                     );
                                                 } else {
                                                     commandManager.execute(
                                                         new AddKeyframeCommand(
-                                                            selectedData.trackId,
+                                                            selectedData!.trackId,
                                                             paramPath,
                                                             {
                                                                 id: crypto.randomUUID(),
@@ -640,7 +1340,7 @@
                                                                 value: val,
                                                                 interp: "linear",
                                                             },
-                                                            selectedData.cue.id,
+                                                            selectedData!.cue.id,
                                                         ),
                                                     );
                                                 }
@@ -656,20 +1356,21 @@
                                         if (hasKeyframe) {
                                             commandManager.execute(
                                                 new RemoveKeyframeCommand(
-                                                    selectedData.trackId,
+                                                    selectedData!.trackId,
                                                     paramPath,
                                                     projectStore.currentTime,
-                                                    selectedData.cue.id,
+                                                    selectedData!.cue.id,
                                                 ),
                                             );
                                         } else {
                                             const val =
-                                                selectedData.cue.posOverride?.[
-                                                    p.key as keyof typeof selectedData.cue.posOverride
-                                                ] ?? p.defaultVal;
+                                                (
+                                                    selectedData!.cue
+                                                        .posOverride as any
+                                                )?.[p.key] ?? p.defaultVal;
                                             commandManager.execute(
                                                 new AddKeyframeCommand(
-                                                    selectedData.trackId,
+                                                    selectedData!.trackId,
                                                     paramPath,
                                                     {
                                                         id: crypto.randomUUID(),
@@ -677,7 +1378,7 @@
                                                         value: val,
                                                         interp: "linear",
                                                     },
-                                                    selectedData.cue.id,
+                                                    selectedData!.cue.id,
                                                 ),
                                             );
                                         }
@@ -693,6 +1394,115 @@
                             </div>
                         {/each}
                     </div>
+
+                    <!-- Opacity for Cue -->
+                    {#if selectedData}
+                        {@const cueAlphaPath = "styleOverride.alpha"}
+                        {@const cueAlphaDefault =
+                            selectedData.cue.styleOverride?.alpha ?? 1}
+                        {@const cueAlphaVal = getCueValueAt(
+                            selectedData.cue,
+                            cueAlphaPath,
+                            cueAlphaDefault,
+                            projectStore.currentTime,
+                        )}
+                        {@const cueAlphaAnim = selectedData.cue.animTracks.find(
+                            (a) => a.paramPath === cueAlphaPath,
+                        )}
+                        {@const cueHasKf = cueAlphaAnim?.keyframes.some(
+                            (k) =>
+                                Math.abs(k.tMs - projectStore.currentTime) < 1,
+                        )}
+
+                        <div class="row" style="margin-top: 0.5rem;">
+                            <label for="cue-opacity">Opacity (%)</label>
+
+                            <div class="field-with-kf">
+                                <div class="field time-input">
+                                    <input
+                                        id="cue-opacity"
+                                        type="range"
+                                        min="0"
+                                        max="100"
+                                        step="1"
+                                        value={cueAlphaVal * 100}
+                                        onchange={(e) => {
+                                            if (selectedData) {
+                                                const val =
+                                                    parseFloat(
+                                                        (
+                                                            e.target as HTMLInputElement
+                                                        ).value,
+                                                    ) / 100;
+                                                // Update base value
+                                                commandManager.execute(
+                                                    new UpdateCueStyleCommand(
+                                                        selectedData.trackId,
+                                                        selectedData.cue.id,
+                                                        { alpha: val },
+                                                    ),
+                                                );
+
+                                                // Update keyframe if exists
+                                                if (cueHasKf) {
+                                                    commandManager.execute(
+                                                        new UpdateKeyframeValueCommand(
+                                                            selectedData.trackId,
+                                                            cueAlphaPath,
+                                                            projectStore.currentTime,
+                                                            val,
+                                                            selectedData.cue.id,
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                        }}
+                                    />
+                                    <span class="unit" style="float: right;"
+                                        >{Math.round(cueAlphaVal * 100)}%</span
+                                    >
+                                </div>
+                                <button
+                                    class="small-btn kf-btn"
+                                    class:active={cueHasKf}
+                                    onclick={() => {
+                                        if (!selectedData) return;
+                                        if (cueHasKf) {
+                                            commandManager.execute(
+                                                new RemoveKeyframeCommand(
+                                                    selectedData.trackId,
+                                                    cueAlphaPath,
+                                                    projectStore.currentTime,
+                                                    selectedData.cue.id,
+                                                ),
+                                            );
+                                        } else {
+                                            commandManager.execute(
+                                                new AddKeyframeCommand(
+                                                    selectedData.trackId,
+                                                    cueAlphaPath,
+                                                    {
+                                                        id: crypto.randomUUID(),
+                                                        tMs: projectStore.currentTime,
+                                                        value: cueAlphaVal,
+                                                        interp: "linear",
+                                                    },
+                                                    selectedData.cue.id,
+                                                ),
+                                            );
+                                        }
+                                    }}
+                                >
+                                    <Diamond
+                                        size={10}
+                                        fill={cueHasKf
+                                            ? "currentColor"
+                                            : "none"}
+                                    />
+                                </button>
+                            </div>
+                        </div>
+                    {/if}
                 </div>
 
                 <div class="row">
@@ -703,13 +1513,14 @@
                             title="Track Text Color (Base)"
                         >
                             <input
+                                id="track-color"
                                 type="color"
-                                value={selectedData.track.defaultStyle.color ||
+                                value={selectedData!.track.defaultStyle.color ||
                                     "#ffffff"}
                                 onchange={(e) =>
                                     commandManager.execute(
                                         new UpdateTrackStyleCommand(
-                                            selectedData.trackId,
+                                            selectedData!.trackId,
                                             {
                                                 color: (
                                                     e.target as HTMLInputElement
@@ -717,22 +1528,25 @@
                                             },
                                         ),
                                     )}
-                                style="width: 28px; height: 28px; padding: 1px; cursor: pointer; border: 1px solid var(--border-light); background: var(--bg-header); border-radius: 4px;"
+                                style="width: 24px; height: 24px; padding: 0; cursor: pointer; border: 1px solid var(--border-light); background: var(--bg-header); border-radius: 4px;"
                             />
                         </div>
                         <button
-                            class="more-styles-btn"
+                            class=""
                             onclick={() => openStylePopup("track")}
-                            >Edit Style...</button
+                            title="Advanced Track Style"
+                            style="width: 24px; height: 24px; padding: 0; display: flex; align-items: center; justify-content: center; background: var(--bg-header); border: 1px solid var(--border-light); color: var(--text-dim); cursor: pointer; border-radius: 4px;"
                         >
+                            <Settings size={14} />
+                        </button>
                     </div>
                 </div>
 
                 <div class="row">
                     <span class="label-text">Track Transform</span>
                     {#each [{ label: "X (%)", path: "transform.xNorm", step: 1, scale: 100, defaultVal: 0.5 }, { label: "Y (%)", path: "transform.yNorm", step: 1, scale: 100, defaultVal: 0.8 }, { label: "Scale", path: "transform.scale", step: 0.1, scale: 1, defaultVal: 1 }, { label: "Rotation", path: "transform.rotation", step: 1, scale: 1, defaultVal: 0 }] as p}
-                        {@const track = projectStore.project.tracks.find(
-                            (t) => t.id === selectedData?.trackId,
+                        {@const track = projectStore.project?.tracks.find(
+                            (t) => t.id === selectedData!.trackId,
                         )}
                         {@const animTrack = track?.animTracks.find(
                             (a) => a.paramPath === p.path,
@@ -755,9 +1569,11 @@
                             style="margin-bottom: 0.5rem; align-items: center;"
                         >
                             <div class="time-input">
-                                <label for="track-{p.path}">{p.label}</label>
+                                <label for="track-{p.path.replace('.', '-')}"
+                                    >{p.label}</label
+                                >
                                 <input
-                                    id="track-{p.path}"
+                                    id="track-{p.path.replace('.', '-')}"
                                     type="number"
                                     step={p.step}
                                     value={currentVal * p.scale}
@@ -839,267 +1655,780 @@
                         </div>
                     {/each}
                 </div>
+
+                <!-- Opacity for Track -->
+                {#if selectedData}
+                    {@const trackAlphaPath = "defaultStyle.alpha"}
+                    {@const trackAlphaDefault =
+                        selectedData.track.defaultStyle.alpha ?? 1}
+                    {@const trackAlphaVal = getTrackValue(
+                        selectedData.track,
+                        trackAlphaPath,
+                        trackAlphaDefault,
+                        projectStore.currentTime,
+                    )}
+                    {@const trackAlphaAnim = selectedData.track.animTracks.find(
+                        (a) => a.paramPath === trackAlphaPath,
+                    )}
+                    {@const trackHasKf = trackAlphaAnim?.keyframes.some(
+                        (k) => Math.abs(k.tMs - projectStore.currentTime) < 1,
+                    )}
+
+                    <div class="row">
+                        <label for="track-opacity">Track Opacity (%)</label>
+
+                        <div class="field-with-kf">
+                            <div class="field time-input">
+                                <input
+                                    id="track-opacity"
+                                    type="range"
+                                    min="0"
+                                    max="100"
+                                    step="1"
+                                    value={trackAlphaVal * 100}
+                                    onchange={(e) => {
+                                        if (selectedData) {
+                                            const val =
+                                                parseFloat(
+                                                    (
+                                                        e.target as HTMLInputElement
+                                                    ).value,
+                                                ) / 100;
+                                            // Update base value
+                                            commandManager.execute(
+                                                new UpdateTrackStyleCommand(
+                                                    selectedData.trackId,
+                                                    { alpha: val },
+                                                ),
+                                            );
+
+                                            // Update keyframe if exists
+                                            if (trackHasKf) {
+                                                commandManager.execute(
+                                                    new UpdateKeyframeValueCommand(
+                                                        selectedData.trackId,
+                                                        trackAlphaPath,
+                                                        projectStore.currentTime,
+                                                        val,
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    }}
+                                />
+                                <span class="unit" style="float: right;"
+                                    >{Math.round(trackAlphaVal * 100)}%</span
+                                >
+                            </div>
+                            <button
+                                class="small-btn kf-btn"
+                                class:active={trackHasKf}
+                                onclick={() => {
+                                    if (!selectedData) return;
+                                    if (trackHasKf) {
+                                        commandManager.execute(
+                                            new RemoveKeyframeCommand(
+                                                selectedData.trackId,
+                                                trackAlphaPath,
+                                                projectStore.currentTime,
+                                            ),
+                                        );
+                                    } else {
+                                        commandManager.execute(
+                                            new AddKeyframeCommand(
+                                                selectedData.trackId,
+                                                trackAlphaPath,
+                                                {
+                                                    id: crypto.randomUUID(),
+                                                    tMs: projectStore.currentTime,
+                                                    value: trackAlphaVal,
+                                                    interp: "linear",
+                                                },
+                                            ),
+                                        );
+                                    }
+                                }}
+                            >
+                                <Diamond
+                                    size={10}
+                                    fill={trackHasKf ? "currentColor" : "none"}
+                                />
+                            </button>
+                        </div>
+                    </div>
+                {/if}
             {:else if activeTab === "keyframe"}
                 <!-- Keyframe Tab Content -->
                 <div class="keyframe-header">
                     <History size={16} />
-                    <span>Animation Control</span>
+                    <span>Timeline & Effects</span>
                 </div>
 
-                <div class="cue-preview-box">
-                    <span class="label-text">Current Subtitle</span>
-                    <div class="preview-text">
-                        "{selectedData.cue.plainText}"
-                    </div>
+                <div class="preset-controls-row">
+                    <select
+                        class="preset-select"
+                        bind:value={selectedPresetId}
+                        onchange={(e) => {
+                            const pid = (e.target as HTMLSelectElement).value;
+                            if (pid && selectedData) {
+                                const preset = presetStore.presets.find(
+                                    (p) => p.id === pid,
+                                );
+                                if (preset) {
+                                    commandManager.execute(
+                                        new ApplyAnimationPresetCommand(
+                                            selectedData.trackId,
+                                            selectedData.cue.id,
+                                            preset,
+                                        ),
+                                    );
+                                }
+                            }
+                        }}
+                    >
+                        <option value="">Apply Preset...</option>
+                        {#each presetStore.presets as p}
+                            <option value={p.id}>{p.name}</option>
+                        {/each}
+                    </select>
+                    <button
+                        class="preset-icon-btn"
+                        onclick={saveAnimationPreset}
+                        title="Save as Preset"
+                    >
+                        <Save size={16} />
+                    </button>
+                    <button
+                        class="preset-icon-btn"
+                        onclick={deleteAnimationPreset}
+                        disabled={!selectedPresetId}
+                        title="Delete Preset"
+                    >
+                        <Trash2 size={16} />
+                    </button>
                 </div>
 
-                <div class="keyframes-scroll-area">
-                    {#each selectedData.cue.animTracks as anim}
-                        <div class="anim-track-row">
-                            <div class="track-info-header">
-                                <div class="track-info">
-                                    <span class="param-name"
-                                        >{anim.paramPath
-                                            .replace("posOverride.", "")
-                                            .replace("edgeEffects.", "")
-                                            .replace(".width", " Width")}</span
-                                    >
-                                    <span class="kf-count"
-                                        >{anim.keyframes.length} keys</span
-                                    >
+                <div class="effect-tracks-list">
+                    <p class="section-label">Active Effects</p>
+
+                    {#if selectedData.cue.effects && selectedData.cue.effects.length > 0}
+                        {#each selectedData.cue.effects as effect}
+                            {@const plugin = effectRegistry.get(effect.type)}
+                            {@const kfCount = selectedData.cue.animTracks
+                                .filter((a) =>
+                                    a.paramPath.startsWith(
+                                        `effects.${effect.id}`,
+                                    ),
+                                )
+                                .reduce(
+                                    (acc, a) => acc + a.keyframes.length,
+                                    0,
+                                )}
+                            <div
+                                class="effect-track-item"
+                                onclick={() => {
+                                    editingEffectId = effect.id;
+                                    if (COLOR_EFFECTS.includes(effect.type)) {
+                                        activeTab = "color-effect";
+                                    } else {
+                                        activeTab = "effect";
+                                    }
+                                }}
+                            >
+                                <div class="track-icon">
+                                    <Diamond size={14} />
                                 </div>
-                                <div class="kf-controls">
-                                    <button
-                                        class="mini-btn"
-                                        onclick={() => jumpToPrevKeyframe(anim)}
-                                        title="Previous Keyframe"
+                                <div class="track-info">
+                                    <span class="track-name"
+                                        >{plugin?.label || effect.type}</span
                                     >
-                                        <ChevronLeft size={14} />
-                                    </button>
-                                    <div
-                                        class="kf-mini-timeline"
-                                        onclick={(e) => {
-                                            const rect =
-                                                e.currentTarget.getBoundingClientRect();
-                                            const pct =
-                                                (e.clientX - rect.left) /
-                                                rect.width;
-                                            const duration =
-                                                selectedData.cue.endMs -
-                                                selectedData.cue.startMs;
-                                            projectStore.currentTime =
-                                                selectedData.cue.startMs +
-                                                pct * duration;
-                                        }}
-                                    >
-                                        {#each anim.keyframes as kf}
-                                            <div
-                                                class="kf-tick"
-                                                class:current={Math.abs(
-                                                    kf.tMs -
-                                                        projectStore.currentTime,
-                                                ) < 1}
-                                                style="left: {((kf.tMs -
-                                                    selectedData.cue.startMs) /
-                                                    (selectedData.cue.endMs -
-                                                        selectedData.cue
-                                                            .startMs)) *
-                                                    100}%"
-                                                onmousedown={(e) =>
-                                                    handleKeyframeTickMouseDown(
-                                                        e,
-                                                        anim,
-                                                        kf,
-                                                    )}
-                                            ></div>
-                                        {/each}
-                                    </div>
-                                    <button
-                                        class="mini-btn add-kf-btn"
-                                        onclick={() => {
-                                            if (!selectedData) return;
-                                            const currentVal = getCueValueAt(
-                                                selectedData.cue,
-                                                anim.paramPath,
-                                                anim.defaultValue || 0,
-                                                projectStore.currentTime,
-                                            );
+                                    <span class="track-meta">
+                                        {kfCount} keyframes
+                                    </span>
+                                </div>
+                                <button class="track-edit-btn">
+                                    <Settings size={14} />
+                                </button>
+                            </div>
+                        {/each}
+                    {:else}
+                        <div class="empty-tracks">
+                            No effects applied. Go to Effects tab to add one.
+                        </div>
+                    {/if}
+                </div>
+            {:else if activeTab === "effect" && selectedData}
+                <!-- Effect Tab Content -->
+                <div class="effect-tab-header">
+                    <span>Active Effects</span>
+                    <select
+                        class="add-effect-select"
+                        onchange={(e) => {
+                            const type = (e.target as HTMLSelectElement).value;
+                            if (type && selectedData) {
+                                commandManager.execute(
+                                    new AddEffectCommand(
+                                        selectedData!.trackId,
+                                        type,
+                                        {},
+                                        selectedData!.cue.id,
+                                    ),
+                                );
+                                (e.target as HTMLSelectElement).value = "";
+                            }
+                        }}
+                    >
+                        <option value="">+ Add Effect...</option>
+                        {#each effectRegistry
+                            .getAll()
+                            .filter((p) => !COLOR_EFFECTS.includes(p.type)) as plugin}
+                            <option value={plugin.type}>{plugin.label}</option>
+                        {/each}
+                    </select>
+                </div>
+
+                <div
+                    class="effects-list"
+                    use:dndzone={{
+                        items: currentActiveEffects,
+                        flipDurationMs: 200,
+                        dropTargetStyle: {},
+                    }}
+                    onconsider={handleActiveConsider}
+                    onfinalize={handleActiveFinalize}
+                >
+                    {#each currentActiveEffects as effect (effect.id)}
+                        {@const plugin = effectRegistry.get(effect.type)}
+                        <div
+                            class="effect-item-card"
+                            role="listitem"
+                            animate:flip={{ duration: 200 }}
+                        >
+                            <div class="effect-item-header">
+                                <span class="effect-label"
+                                    >{plugin?.label || effect.type}</span
+                                >
+                                <button
+                                    class="mini-btn delete-effect"
+                                    onclick={() => {
+                                        if (selectedData) {
                                             commandManager.execute(
-                                                new AddKeyframeCommand(
-                                                    selectedData.trackId,
-                                                    anim.paramPath,
-                                                    {
-                                                        id: crypto.randomUUID(),
-                                                        tMs: projectStore.currentTime,
-                                                        value: currentVal,
-                                                        interp: "linear",
-                                                    },
-                                                    selectedData.cue.id,
+                                                new RemoveEffectCommand(
+                                                    selectedData!.trackId,
+                                                    effect.id,
+                                                    selectedData!.cue.id,
                                                 ),
                                             );
-                                        }}
-                                        title="Add Keyframe at Current Time"
-                                    >
-                                        <Plus size={14} />
-                                    </button>
-                                    <button
-                                        class="mini-btn"
-                                        onclick={() => jumpToNextKeyframe(anim)}
-                                        title="Next Keyframe"
-                                    >
-                                        <ChevronRight size={14} />
-                                    </button>
-                                </div>
+                                        }
+                                    }}
+                                >
+                                    <Trash2 size={14} />
+                                </button>
                             </div>
+                            <div class="effect-params">
+                                {#if plugin}
+                                    {#each plugin.parameters as p}
+                                        <div class="param-row">
+                                            <label for="eff-{effect.id}-{p.id}"
+                                                >{p.label}</label
+                                            >
+                                            <div class="param-input-wrap">
+                                                {#if p.type === "number"}
+                                                    {@const path = `effects.${effect.id}.${p.id}`}
+                                                    <input
+                                                        id="eff-{effect.id}-{p.id}"
+                                                        type="range"
+                                                        min={p.min ?? 0}
+                                                        max={p.max ?? 100}
+                                                        step={p.step ?? 1}
+                                                        value={effect.params[
+                                                            p.id
+                                                        ] ?? p.default}
+                                                        onchange={(e) => {
+                                                            const val =
+                                                                parseFloat(
+                                                                    (
+                                                                        e.target as HTMLInputElement
+                                                                    ).value,
+                                                                );
+                                                            commandManager.execute(
+                                                                new UpdateEffectParamCommand(
+                                                                    selectedData!.trackId,
+                                                                    effect.id,
+                                                                    {
+                                                                        [p.id]: effect
+                                                                            .params[
+                                                                            p.id
+                                                                        ],
+                                                                    },
+                                                                    {
+                                                                        [p.id]: val,
+                                                                    },
+                                                                    selectedData!.cue.id,
+                                                                ),
+                                                            );
+                                                        }}
+                                                    />
+                                                    <span class="param-val"
+                                                        >{effect.params[p.id] ??
+                                                            p.default}</span
+                                                    >
 
-                            <div class="kf-edit-list">
-                                {#each anim.keyframes as kf (kf.id)}
-                                    <div
-                                        class="kf-edit-row"
-                                        class:current={Math.abs(
-                                            kf.tMs - projectStore.currentTime,
-                                        ) < 1}
-                                    >
-                                        <button
-                                            class="kf-jump-indicator"
-                                            onclick={() =>
-                                                (projectStore.currentTime =
-                                                    kf.tMs)}
-                                        >
-                                            <Diamond
-                                                size={8}
-                                                fill={Math.abs(
-                                                    kf.tMs -
-                                                        projectStore.currentTime,
-                                                ) < 1
-                                                    ? "currentColor"
-                                                    : "none"}
-                                            />
-                                        </button>
-                                        <div class="kf-field t-field">
-                                            <input
-                                                type="number"
-                                                value={Math.round(
-                                                    kf.tMs -
-                                                        selectedData.cue
-                                                            .startMs,
-                                                )}
-                                                onchange={(e) => {
-                                                    if (!selectedData) return;
-                                                    const relT = parseInt(
-                                                        (
-                                                            e.target as HTMLInputElement
-                                                        ).value,
-                                                    );
-                                                    let newT =
-                                                        selectedData.cue
-                                                            .startMs + relT;
+                                                    <button
+                                                        class="kf-btn"
+                                                        class:active={projectStore.hasAnimation(
+                                                            selectedData!
+                                                                .trackId,
+                                                            path,
+                                                            selectedData!.cue
+                                                                .id,
+                                                        )}
+                                                        onclick={() =>
+                                                            projectStore.toggleKeyframeTrack(
+                                                                selectedData!
+                                                                    .trackId,
+                                                                path,
+                                                                selectedData!
+                                                                    .cue.id,
+                                                            )}
+                                                        title="Animate this"
+                                                    >
+                                                        <Diamond
+                                                            size={12}
+                                                            fill={projectStore.hasAnimation(
+                                                                selectedData!
+                                                                    .trackId,
+                                                                path,
+                                                                selectedData!
+                                                                    .cue.id,
+                                                            )
+                                                                ? "currentColor"
+                                                                : "none"}
+                                                        />
+                                                    </button>
 
-                                                    // Clamp to cue boundaries
-                                                    newT = Math.max(
-                                                        selectedData.cue
-                                                            .startMs,
-                                                        Math.min(
-                                                            selectedData.cue
-                                                                .endMs,
-                                                            newT,
-                                                        ),
-                                                    );
+                                                    <button
+                                                        class="kf-add-btn"
+                                                        onclick={() => {
+                                                            const currentVal =
+                                                                effect.params[
+                                                                    p.id
+                                                                ] ?? p.default;
+                                                            commandManager.execute(
+                                                                new AddKeyframeCommand(
+                                                                    selectedData!.trackId,
+                                                                    path,
+                                                                    {
+                                                                        id: crypto.randomUUID(),
+                                                                        tMs: projectStore.currentTime,
+                                                                        value: currentVal,
+                                                                        interp: "linear",
+                                                                    },
+                                                                    selectedData!.cue.id,
+                                                                ),
+                                                            );
+                                                        }}
+                                                        title="Add Keyframe at current playhead"
+                                                    >
+                                                        <Plus size={12} />
+                                                    </button>
+                                                {:else if p.type === "color"}
+                                                    <input
+                                                        type="color"
+                                                        value={effect.params[
+                                                            p.id
+                                                        ] ?? p.default}
+                                                        onchange={(e) => {
+                                                            const val = (
+                                                                e.target as HTMLInputElement
+                                                            ).value;
+                                                            commandManager.execute(
+                                                                new UpdateEffectParamCommand(
+                                                                    selectedData!.trackId,
+                                                                    effect.id,
+                                                                    {
+                                                                        [p.id]: effect
+                                                                            .params[
+                                                                            p.id
+                                                                        ],
+                                                                    },
+                                                                    {
+                                                                        [p.id]: val,
+                                                                    },
+                                                                    selectedData!.cue.id,
+                                                                ),
+                                                            );
+                                                        }}
+                                                    />
+                                                {/if}
+                                            </div>
+                                        </div>
+                                    {/each}
 
-                                                    if (newT !== kf.tMs) {
+                                    {#if effect.type.endsWith("-in") || effect.type.endsWith("-out")}
+                                        {@const isIn =
+                                            effect.type.endsWith("-in")}
+                                        <div class="fade-shortcuts">
+                                            <button
+                                                class="shortcut-btn"
+                                                onclick={() => {
+                                                    const type = effect.type;
+
+                                                    // Map params to their in/out values
+                                                    const config: Record<
+                                                        string,
+                                                        {
+                                                            hidden: number;
+                                                            visible: number;
+                                                        }
+                                                    > = {
+                                                        fade: {
+                                                            hidden: 0,
+                                                            visible: 1,
+                                                        },
+                                                        slide: {
+                                                            hidden: 100,
+                                                            visible: 0,
+                                                        },
+                                                        zoom: {
+                                                            hidden: 0,
+                                                            visible: 1,
+                                                        },
+                                                        blur: {
+                                                            hidden: 20,
+                                                            visible: 0,
+                                                        },
+                                                    };
+
+                                                    const prefix =
+                                                        type.split("-")[0];
+                                                    const cfg = config[
+                                                        prefix
+                                                    ] || {
+                                                        hidden: 0,
+                                                        visible: 1,
+                                                    };
+                                                    const paramName =
+                                                        prefix === "fade"
+                                                            ? "alpha"
+                                                            : prefix === "slide"
+                                                              ? "y"
+                                                              : prefix ===
+                                                                  "zoom"
+                                                                ? "scale"
+                                                                : prefix ===
+                                                                    "blur"
+                                                                  ? "radius"
+                                                                  : "alpha";
+
+                                                    const path = `effects.${effect.id}.${paramName}`;
+
+                                                    if (isIn) {
+                                                        // Set In End Point
                                                         commandManager.execute(
-                                                            new UpdateKeyframeTimeCommand(
-                                                                selectedData.trackId,
-                                                                anim.paramPath,
-                                                                kf.tMs,
-                                                                newT,
-                                                                selectedData.cue.id,
+                                                            new AddKeyframeCommand(
+                                                                selectedData!.trackId,
+                                                                path,
+                                                                {
+                                                                    id: crypto.randomUUID(),
+                                                                    tMs: selectedData!
+                                                                        .cue
+                                                                        .startMs,
+                                                                    value: cfg.hidden,
+                                                                    interp: "linear",
+                                                                },
+                                                                selectedData!.cue.id,
+                                                            ),
+                                                        );
+                                                        commandManager.execute(
+                                                            new AddKeyframeCommand(
+                                                                selectedData!.trackId,
+                                                                path,
+                                                                {
+                                                                    id: crypto.randomUUID(),
+                                                                    tMs: projectStore.currentTime,
+                                                                    value: cfg.visible,
+                                                                    interp: "linear",
+                                                                },
+                                                                selectedData!.cue.id,
+                                                            ),
+                                                        );
+                                                    } else {
+                                                        // Set Out Start Point
+                                                        commandManager.execute(
+                                                            new AddKeyframeCommand(
+                                                                selectedData!.trackId,
+                                                                path,
+                                                                {
+                                                                    id: crypto.randomUUID(),
+                                                                    tMs: projectStore.currentTime,
+                                                                    value: cfg.visible,
+                                                                    interp: "linear",
+                                                                },
+                                                                selectedData!.cue.id,
+                                                            ),
+                                                        );
+                                                        commandManager.execute(
+                                                            new AddKeyframeCommand(
+                                                                selectedData!.trackId,
+                                                                path,
+                                                                {
+                                                                    id: crypto.randomUUID(),
+                                                                    tMs: selectedData!
+                                                                        .cue
+                                                                        .endMs,
+                                                                    value: cfg.hidden,
+                                                                    interp: "linear",
+                                                                },
+                                                                selectedData!.cue.id,
                                                             ),
                                                         );
                                                     }
                                                 }}
-                                            />
-                                            <span class="unit">ms</span>
+                                            >
+                                                {isIn
+                                                    ? `Set ${plugin?.label || "In"} End (Point)`
+                                                    : `Set ${plugin?.label || "Out"} Start (Point)`}
+                                            </button>
                                         </div>
-                                        <div class="kf-field v-field">
-                                            <input
-                                                type="number"
-                                                step="0.01"
-                                                value={kf.value}
-                                                onchange={(e) => {
-                                                    if (!selectedData) return;
-                                                    const val = parseFloat(
-                                                        (
-                                                            e.target as HTMLInputElement
-                                                        ).value,
-                                                    );
-                                                    commandManager.execute(
-                                                        new UpdateKeyframeValueCommand(
-                                                            selectedData.trackId,
-                                                            anim.paramPath,
-                                                            kf.tMs,
-                                                            val,
-                                                            selectedData.cue.id,
-                                                        ),
-                                                    );
-                                                }}
-                                            />
-                                        </div>
-                                        <select
-                                            class="kf-interp-select"
-                                            value={kf.interp}
-                                            onchange={(e) => {
-                                                const interp = (
-                                                    e.target as HTMLSelectElement
-                                                ).value;
-                                                projectStore.updateKeyframe(
-                                                    selectedData.trackId,
-                                                    anim.paramPath,
-                                                    kf.tMs,
-                                                    { interp },
-                                                    selectedData.cue.id,
-                                                );
-                                            }}
-                                        >
-                                            <option value="linear"
-                                                >Linear</option
-                                            >
-                                            <option value="hold">Hold</option>
-                                            <option value="easeIn"
-                                                >Ease In</option
-                                            >
-                                            <option value="easeOut"
-                                                >Ease Out</option
-                                            >
-                                            <option value="easeInOut"
-                                                >Ease InOut</option
-                                            >
-                                        </select>
-                                        <button
-                                            class="mini-btn delete-kf"
-                                            onclick={() => {
+                                    {/if}
+                                {/if}
+                            </div>
+                        </div>
+                    {/each}
+
+                    {#if !selectedData.cue.effects || selectedData!.cue.effects.length === 0}
+                        <div class="placeholder-box">
+                            No effects added to this cue.
+                        </div>
+                    {/if}
+                </div>
+            {:else if activeTab === "color-effect" && selectedData}
+                <!-- Color Effect Tab Content -->
+                <div class="effect-tab-header">
+                    <span>Color Effects</span>
+                    <select
+                        class="add-effect-select"
+                        onchange={(e) => {
+                            const type = (e.target as HTMLSelectElement).value;
+                            if (type && selectedData) {
+                                commandManager.execute(
+                                    new AddEffectCommand(
+                                        selectedData!.trackId,
+                                        type,
+                                        {},
+                                        selectedData!.cue.id,
+                                    ),
+                                );
+                                (e.target as HTMLSelectElement).value = "";
+                            }
+                        }}
+                    >
+                        <option value="">+ Add Color Effect...</option>
+                        {#each effectRegistry
+                            .getAll()
+                            .filter( (p) => COLOR_EFFECTS.includes(p.type), ) as plugin}
+                            <option value={plugin.type}>{plugin.label}</option>
+                        {/each}
+                    </select>
+                </div>
+
+                <div
+                    class="effects-list"
+                    use:dndzone={{
+                        items: currentColorEffects,
+                        flipDurationMs: 200,
+                        dropTargetStyle: {},
+                    }}
+                    onconsider={handleColorConsider}
+                    onfinalize={handleColorFinalize}
+                >
+                    {#each currentColorEffects as effect (effect.id)}
+                        {@const plugin = effectRegistry.get(effect.type)}
+                        <div
+                            class="effect-item-card"
+                            role="listitem"
+                            animate:flip={{ duration: 200 }}
+                        >
+                            <div class="effect-item-header">
+                                <span class="effect-label"
+                                    >{plugin?.label || effect.type}</span
+                                >
+                                <div class="effect-actions">
+                                    <button
+                                        class="mini-btn-icon"
+                                        onclick={() => {
+                                            if (effect.id) {
+                                                editingEffectId = effect.id;
+                                                activeTab = "color-effect";
+                                            }
+                                        }}
+                                        title="Detailed Color Editor"
+                                    >
+                                        <Settings size={14} />
+                                    </button>
+                                    <button
+                                        class="mini-btn-icon delete"
+                                        onclick={() => {
+                                            if (selectedData) {
                                                 commandManager.execute(
-                                                    new RemoveKeyframeCommand(
-                                                        selectedData.trackId,
-                                                        anim.paramPath,
-                                                        kf.tMs,
-                                                        selectedData.cue.id,
+                                                    new RemoveEffectCommand(
+                                                        selectedData!.trackId,
+                                                        effect.id,
+                                                        selectedData!.cue.id,
                                                     ),
                                                 );
-                                            }}
-                                        >
-                                            <Trash2 size={12} />
-                                        </button>
+                                            }
+                                        }}
+                                        title="Remove Effect"
+                                    >
+                                        <Trash2 size={14} />
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="effect-params">
+                                {#each (plugin?.parameters || []).filter((p) => !COLOR_EFFECTS.includes(effect.type) || p.id === "intensity") as param}
+                                    {@const path = `effects.${effect.id}.${param.id}`}
+                                    {@const track =
+                                        selectedData.cue.animTracks.find(
+                                            (t) => t.paramPath === path,
+                                        )}
+                                    <div class="param-row">
+                                        <div class="param-label-group">
+                                            <label
+                                                for="color-eff-{effect.id}-{param.id}"
+                                                >{param.label}</label
+                                            >
+                                        </div>
+                                        <div class="param-input-group">
+                                            {#if param.type === "number"}
+                                                <input
+                                                    id="color-eff-{effect.id}-{param.id}"
+                                                    type="range"
+                                                    min={param.min}
+                                                    max={param.max}
+                                                    step={param.step || 1}
+                                                    value={effect.params[
+                                                        param.id
+                                                    ] ?? param.default}
+                                                    oninput={(e) => {
+                                                        const val = parseFloat(
+                                                            (
+                                                                e.target as HTMLInputElement
+                                                            ).value,
+                                                        );
+                                                        const oldParams = {
+                                                            ...effect.params,
+                                                        };
+                                                        const newParams = {
+                                                            ...oldParams,
+                                                            [param.id]: val,
+                                                        };
+                                                        commandManager.execute(
+                                                            new UpdateEffectParamCommand(
+                                                                selectedData!.trackId,
+                                                                effect.id,
+                                                                oldParams,
+                                                                newParams,
+                                                                selectedData!.cue.id,
+                                                            ),
+                                                        );
+                                                    }}
+                                                />
+                                                <span class="num-val"
+                                                    >{effect.params[param.id] ??
+                                                        param.default}</span
+                                                >
+                                                <button
+                                                    class="mini-btn-icon kf-toggle"
+                                                    class:active={track &&
+                                                        track.keyframes.length >
+                                                            0}
+                                                    onclick={() =>
+                                                        projectStore.toggleKeyframeTrack(
+                                                            selectedData!
+                                                                .trackId,
+                                                            path,
+                                                            selectedData!.cue
+                                                                .id,
+                                                        )}
+                                                    title="Toggle Keyframe Track"
+                                                >
+                                                    <Diamond
+                                                        size={12}
+                                                        fill={track &&
+                                                        track.keyframes.length >
+                                                            0
+                                                            ? "currentColor"
+                                                            : "none"}
+                                                    />
+                                                </button>
+                                                <button
+                                                    class="mini-btn-icon kf-add-btn"
+                                                    onclick={() => {
+                                                        const currentVal =
+                                                            effect.params[
+                                                                param.id
+                                                            ] ?? param.default;
+                                                        commandManager.execute(
+                                                            new AddKeyframeCommand(
+                                                                selectedData!.trackId,
+                                                                path,
+                                                                {
+                                                                    id: crypto.randomUUID(),
+                                                                    tMs: projectStore.currentTime,
+                                                                    value: currentVal,
+                                                                    interp: "linear",
+                                                                },
+                                                                selectedData!.cue.id,
+                                                            ),
+                                                        );
+                                                    }}
+                                                    title="Add Keyframe at Current Time"
+                                                >
+                                                    <Plus size={14} />
+                                                </button>
+                                            {:else if param.type === "color"}
+                                                <input
+                                                    id="color-eff-{effect.id}-{param.id}"
+                                                    type="color"
+                                                    value={effect.params[
+                                                        param.id
+                                                    ] ?? param.default}
+                                                    oninput={(e) => {
+                                                        const val = (
+                                                            e.target as HTMLInputElement
+                                                        ).value;
+                                                        const oldParams = {
+                                                            ...effect.params,
+                                                        };
+                                                        const newParams = {
+                                                            ...oldParams,
+                                                            [param.id]: val,
+                                                        };
+                                                        commandManager.execute(
+                                                            new UpdateEffectParamCommand(
+                                                                selectedData!.trackId,
+                                                                effect.id,
+                                                                oldParams,
+                                                                newParams,
+                                                                selectedData!.cue.id,
+                                                            ),
+                                                        );
+                                                    }}
+                                                />
+                                            {/if}
+                                        </div>
                                     </div>
                                 {/each}
                             </div>
                         </div>
                     {/each}
 
-                    {#if selectedData.cue.animTracks.length === 0}
+                    {#if !selectedData.cue.effects || !selectedData.cue.effects.some( (e) => COLOR_EFFECTS.includes(e.type), )}
                         <div class="placeholder-box">
-                            No keyframes added to this cue yet. Use the diamond
-                            icons in the Inspector tab to add keyframes.
+                            No color effects added to this cue.
                         </div>
                     {/if}
                 </div>
@@ -1124,551 +2453,6 @@
     {:else}
         <div class="empty">Select a cue to edit properties.</div>
     {/if}
-
-    {#snippet styleContent()}
-        {#if popupType === "track"}
-            {@const currentStyle = selectedData.track.defaultStyle}
-            {@const updateFn = (s: any) =>
-                commandManager.execute(
-                    new UpdateTrackStyleCommand(selectedData.trackId, s),
-                )}
-            <section>
-                <h4>Text Color</h4>
-                <div class="popup-row">
-                    <label>Color:</label>
-                    <input
-                        type="color"
-                        value={currentStyle.color || "#ffffff"}
-                        onchange={(e) =>
-                            updateFn({
-                                color: (e.target as HTMLInputElement).value,
-                            })}
-                    />
-                </div>
-            </section>
-            <section>
-                <h4>Background</h4>
-                <div class="popup-row">
-                    <label>Box:</label>
-                    <input
-                        type="checkbox"
-                        checked={!!currentStyle.backgroundColor}
-                        onchange={(e) =>
-                            updateFn({
-                                backgroundColor: (e.target as HTMLInputElement)
-                                    .checked
-                                    ? "#000000"
-                                    : undefined,
-                            })}
-                    />
-                </div>
-                {#if currentStyle.backgroundColor}
-                    <div class="popup-row">
-                        <label>Color:</label>
-                        <input
-                            type="color"
-                            value={currentStyle.backgroundColor}
-                            onchange={(e) =>
-                                updateFn({
-                                    backgroundColor: (
-                                        e.target as HTMLInputElement
-                                    ).value,
-                                })}
-                        />
-                    </div>
-                    <div class="popup-row">
-                        <label>Alpha:</label>
-                        <input
-                            type="range"
-                            min="0"
-                            max="1"
-                            step="0.05"
-                            value={currentStyle.backgroundAlpha ?? 0.5}
-                            onchange={(e) =>
-                                updateFn({
-                                    backgroundAlpha: parseFloat(
-                                        (e.target as HTMLInputElement).value,
-                                    ),
-                                })}
-                        />
-                        <span
-                            >{Math.round(
-                                (currentStyle.backgroundAlpha ?? 0.5) * 100,
-                            )}%</span
-                        >
-                    </div>
-                {/if}
-            </section>
-            <section>
-                <h4>Edge Effect</h4>
-                <div class="popup-row edge-checks">
-                    <label>Types:</label>
-                    <div class="edge-check-group">
-                        {#each ["outline", "shadow", "glow", "bevel"] as type}
-                            <label class="edge-check-label">
-                                <input
-                                    type="checkbox"
-                                    checked={currentStyle.edgeEffects?.[
-                                        type as "outline"
-                                    ]?.enabled ?? false}
-                                    onchange={(e) => {
-                                        const active = (
-                                            e.target as HTMLInputElement
-                                        ).checked;
-                                        const nextEffects = {
-                                            ...(currentStyle.edgeEffects || {}),
-                                        };
-                                        (nextEffects as any)[type] = {
-                                            ...((nextEffects as any)[type] || {
-                                                color: "#000000",
-                                                width: 1,
-                                            }),
-                                            enabled: active,
-                                        };
-                                        updateFn({
-                                            edgeEffects: nextEffects,
-                                        });
-                                        if (active) activeEdgeTab = type as any;
-                                    }}
-                                />
-                                {type.charAt(0).toUpperCase() + type.slice(1)}
-                            </label>
-                        {/each}
-                    </div>
-                </div>
-
-                {#if Object.values(currentStyle.edgeEffects || {}).some((e) => e.enabled)}
-                    <div class="edge-tabs">
-                        {#each ["outline", "shadow", "glow", "bevel"] as type}
-                            {#if currentStyle.edgeEffects?.[type as "outline"]?.enabled}
-                                <button
-                                    class="edge-tab"
-                                    class:active={activeEdgeTab === type}
-                                    onclick={() =>
-                                        (activeEdgeTab = type as any)}
-                                >
-                                    {type}
-                                </button>
-                            {/if}
-                        {/each}
-                    </div>
-
-                    {@const activeConfig =
-                        currentStyle.edgeEffects?.[activeEdgeTab]}
-                    {#if activeConfig && activeConfig.enabled}
-                        <div class="popup-row">
-                            <label>Color:</label>
-                            <input
-                                type="color"
-                                value={activeConfig.color ?? "#000000"}
-                                onchange={(e) => {
-                                    const nextEffects = {
-                                        ...(currentStyle.edgeEffects || {}),
-                                    };
-                                    (nextEffects as any)[activeEdgeTab] = {
-                                        ...activeConfig,
-                                        color: (e.target as HTMLInputElement)
-                                            .value,
-                                    };
-                                    updateFn({
-                                        edgeEffects: nextEffects,
-                                    });
-                                }}
-                            />
-                        </div>
-                        <div class="popup-row">
-                            <label>Width:</label>
-                            <input
-                                type="range"
-                                min="0"
-                                max="10"
-                                step="0.5"
-                                value={activeConfig.width ?? 1}
-                                onchange={(e) => {
-                                    const nextEffects = {
-                                        ...(currentStyle.edgeEffects || {}),
-                                    };
-                                    (nextEffects as any)[activeEdgeTab] = {
-                                        ...activeConfig,
-                                        width: parseFloat(
-                                            (e.target as HTMLInputElement)
-                                                .value,
-                                        ),
-                                    };
-                                    updateFn({
-                                        edgeEffects: nextEffects,
-                                    });
-                                }}
-                            />
-                            <span>{activeConfig.width}px</span>
-                        </div>
-                    {/if}
-                {/if}
-            </section>
-        {:else}
-            {@const currentStyle =
-                selectedData.cue.styleOverride ??
-                selectedData.track.defaultStyle}
-            {@const updateFn = (s: any) =>
-                commandManager.execute(
-                    new UpdateCueStyleCommand(
-                        selectedData.trackId,
-                        selectedData.cue.id,
-                        s,
-                    ),
-                )}
-
-            <!-- Opacity Section with Keyframing -->
-            {@const alphaParamPath = "alpha"}
-            {@const alphaAnimTrack = selectedData.cue.animTracks.find(
-                (a: any) => a.paramPath === alphaParamPath,
-            )}
-            {@const alphaHasKeyframe = alphaAnimTrack?.keyframes.some(
-                (k: any) => Math.abs(k.tMs - projectStore.currentTime) < 1,
-            )}
-            {@const currentAlpha = getCueValueAt(
-                selectedData.cue,
-                alphaParamPath,
-                selectedData.cue.styleOverride?.alpha ??
-                    selectedData.track.defaultStyle.alpha ??
-                    1,
-                projectStore.currentTime,
-            )}
-
-            <section>
-                <div
-                    style="display: flex; justify-content: space-between; align-items: center;"
-                >
-                    <h4>Opacity (Fade In/Out)</h4>
-                    <button
-                        class="small-btn kf-btn"
-                        class:active={alphaHasKeyframe}
-                        onclick={() => {
-                            if (alphaHasKeyframe) {
-                                commandManager.execute(
-                                    new RemoveKeyframeCommand(
-                                        selectedData.trackId,
-                                        alphaParamPath,
-                                        projectStore.currentTime,
-                                        selectedData.cue.id,
-                                    ),
-                                );
-                            } else {
-                                commandManager.execute(
-                                    new AddKeyframeCommand(
-                                        selectedData.trackId,
-                                        alphaParamPath,
-                                        {
-                                            id: crypto.randomUUID(),
-                                            tMs: projectStore.currentTime,
-                                            value: currentAlpha,
-                                            interp: "linear",
-                                        },
-                                        selectedData.cue.id,
-                                    ),
-                                );
-                            }
-                        }}
-                        title="Toggle Keyframe for Opacity"
-                    >
-                        <Diamond
-                            size={12}
-                            fill={alphaHasKeyframe ? "currentColor" : "none"}
-                        />
-                    </button>
-                </div>
-                <div class="popup-row">
-                    <label>Value:</label>
-                    <input
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.05"
-                        value={currentAlpha}
-                        onchange={(e) => {
-                            const val = parseFloat(
-                                (e.target as HTMLInputElement).value,
-                            );
-                            updateFn({ alpha: val });
-                            if (alphaHasKeyframe) {
-                                commandManager.execute(
-                                    new UpdateKeyframeValueCommand(
-                                        selectedData.trackId,
-                                        alphaParamPath,
-                                        projectStore.currentTime,
-                                        val,
-                                        selectedData.cue.id,
-                                    ),
-                                );
-                            } else if (alphaAnimTrack) {
-                                commandManager.execute(
-                                    new AddKeyframeCommand(
-                                        selectedData.trackId,
-                                        alphaParamPath,
-                                        {
-                                            id: crypto.randomUUID(),
-                                            tMs: projectStore.currentTime,
-                                            value: val,
-                                            interp: "linear",
-                                        },
-                                        selectedData.cue.id,
-                                    ),
-                                );
-                            }
-                        }}
-                    />
-                    <span>{Math.round(currentAlpha * 100)}%</span>
-                </div>
-            </section>
-
-            <section>
-                <h4>Background</h4>
-                <div class="popup-row">
-                    <label>Box:</label>
-                    <input
-                        type="checkbox"
-                        checked={!!currentStyle.backgroundColor}
-                        onchange={(e) =>
-                            updateFn({
-                                backgroundColor: (e.target as HTMLInputElement)
-                                    .checked
-                                    ? "#000000"
-                                    : undefined,
-                            })}
-                    />
-                </div>
-                {#if currentStyle.backgroundColor}
-                    <div class="popup-row">
-                        <label>Color:</label>
-                        <input
-                            type="color"
-                            value={currentStyle.backgroundColor}
-                            onchange={(e) =>
-                                updateFn({
-                                    backgroundColor: (
-                                        e.target as HTMLInputElement
-                                    ).value,
-                                })}
-                        />
-                    </div>
-                    <div class="popup-row">
-                        <label>Alpha:</label>
-                        <input
-                            type="range"
-                            min="0"
-                            max="1"
-                            step="0.05"
-                            value={currentStyle.backgroundAlpha ?? 0.5}
-                            onchange={(e) =>
-                                updateFn({
-                                    backgroundAlpha: parseFloat(
-                                        (e.target as HTMLInputElement).value,
-                                    ),
-                                })}
-                        />
-                        <span
-                            >{Math.round(
-                                (currentStyle.backgroundAlpha ?? 0.5) * 100,
-                            )}%</span
-                        >
-                    </div>
-                {/if}
-            </section>
-            <section>
-                <h4>Edge Effect</h4>
-                <div class="popup-row edge-checks">
-                    <label>Types:</label>
-                    <div class="edge-check-group">
-                        {#each ["outline", "shadow", "glow", "bevel"] as type}
-                            <label class="edge-check-label">
-                                <input
-                                    type="checkbox"
-                                    checked={currentStyle.edgeEffects?.[
-                                        type as "outline"
-                                    ]?.enabled ?? false}
-                                    onchange={(e) => {
-                                        const active = (
-                                            e.target as HTMLInputElement
-                                        ).checked;
-                                        const nextEffects = {
-                                            ...(currentStyle.edgeEffects || {}),
-                                        };
-                                        (nextEffects as any)[type] = {
-                                            ...((nextEffects as any)[type] || {
-                                                color: "#000000",
-                                                width: 1,
-                                            }),
-                                            enabled: active,
-                                        };
-                                        updateFn({
-                                            edgeEffects: nextEffects,
-                                        });
-                                        if (active) activeEdgeTab = type as any;
-                                    }}
-                                />
-                                {type.charAt(0).toUpperCase() + type.slice(1)}
-                            </label>
-                        {/each}
-                    </div>
-                </div>
-
-                {#if Object.values(currentStyle.edgeEffects || {}).some((e) => e.enabled)}
-                    <div class="edge-tabs">
-                        {#each ["outline", "shadow", "glow", "bevel"] as type}
-                            {#if currentStyle.edgeEffects?.[type as "outline"]?.enabled}
-                                <button
-                                    class="edge-tab"
-                                    class:active={activeEdgeTab === type}
-                                    onclick={() =>
-                                        (activeEdgeTab = type as any)}
-                                >
-                                    {type}
-                                </button>
-                            {/if}
-                        {/each}
-                    </div>
-
-                    {@const activeConfig =
-                        currentStyle.edgeEffects?.[activeEdgeTab]}
-                    {#if activeConfig && activeConfig.enabled}
-                        {@const edgeParamPath = `edgeEffects.${activeEdgeTab}.width`}
-                        {@const edgeAnimTrack =
-                            selectedData.cue.animTracks.find(
-                                (a: any) => a.paramPath === edgeParamPath,
-                            )}
-                        {@const edgeHasKeyframe = edgeAnimTrack?.keyframes.some(
-                            (k: any) =>
-                                Math.abs(k.tMs - projectStore.currentTime) < 1,
-                        )}
-                        {@const resolvedWidth = getCueValueAt(
-                            selectedData.cue,
-                            edgeParamPath,
-                            activeConfig.width ?? 1,
-                            projectStore.currentTime,
-                        )}
-
-                        <div class="popup-row">
-                            <label>Color:</label>
-                            <input
-                                type="color"
-                                value={activeConfig.color ?? "#000000"}
-                                onchange={(e) => {
-                                    const nextEffects = {
-                                        ...(currentStyle.edgeEffects || {}),
-                                    };
-                                    (nextEffects as any)[activeEdgeTab] = {
-                                        ...activeConfig,
-                                        color: (e.target as HTMLInputElement)
-                                            .value,
-                                    };
-                                    updateFn({
-                                        edgeEffects: nextEffects,
-                                    });
-                                }}
-                            />
-                        </div>
-                        <div class="popup-row" style="margin-bottom: 4px;">
-                            <div
-                                style="display: flex; justify-content: space-between; align-items: center; width: 100%;"
-                            >
-                                <label>Width:</label>
-                                <button
-                                    class="small-btn kf-btn"
-                                    class:active={edgeHasKeyframe}
-                                    onclick={() => {
-                                        if (edgeHasKeyframe) {
-                                            commandManager.execute(
-                                                new RemoveKeyframeCommand(
-                                                    selectedData.trackId,
-                                                    edgeParamPath,
-                                                    projectStore.currentTime,
-                                                    selectedData.cue.id,
-                                                ),
-                                            );
-                                        } else {
-                                            commandManager.execute(
-                                                new AddKeyframeCommand(
-                                                    selectedData.trackId,
-                                                    edgeParamPath,
-                                                    {
-                                                        id: crypto.randomUUID(),
-                                                        tMs: projectStore.currentTime,
-                                                        value: resolvedWidth,
-                                                        interp: "linear",
-                                                    },
-                                                    selectedData.cue.id,
-                                                ),
-                                            );
-                                        }
-                                    }}
-                                    title={`Toggle Keyframe for ${activeEdgeTab} width`}
-                                >
-                                    <Diamond
-                                        size={12}
-                                        fill={edgeHasKeyframe
-                                            ? "currentColor"
-                                            : "none"}
-                                    />
-                                </button>
-                            </div>
-                        </div>
-                        <div class="popup-row">
-                            <input
-                                type="range"
-                                min="0"
-                                max="10"
-                                step="0.5"
-                                value={resolvedWidth}
-                                onchange={(e) => {
-                                    const val = parseFloat(
-                                        (e.target as HTMLInputElement).value,
-                                    );
-                                    const nextEffects = {
-                                        ...(currentStyle.edgeEffects || {}),
-                                    };
-                                    (nextEffects as any)[activeEdgeTab] = {
-                                        ...activeConfig,
-                                        width: val,
-                                    };
-                                    updateFn({
-                                        edgeEffects: nextEffects,
-                                    });
-
-                                    if (edgeHasKeyframe) {
-                                        commandManager.execute(
-                                            new UpdateKeyframeValueCommand(
-                                                selectedData.trackId,
-                                                edgeParamPath,
-                                                projectStore.currentTime,
-                                                val,
-                                                selectedData.cue.id,
-                                            ),
-                                        );
-                                    } else if (edgeAnimTrack) {
-                                        commandManager.execute(
-                                            new AddKeyframeCommand(
-                                                selectedData.trackId,
-                                                edgeParamPath,
-                                                {
-                                                    id: crypto.randomUUID(),
-                                                    tMs: projectStore.currentTime,
-                                                    value: val,
-                                                    interp: "linear",
-                                                },
-                                                selectedData.cue.id,
-                                            ),
-                                        );
-                                    }
-                                }}
-                            />
-                            <span>{resolvedWidth}px</span>
-                        </div>
-                    {/if}
-                {/if}
-            </section>
-        {/if}
-    {/snippet}
-
     {#if showStylePopup && selectedData}
         <div
             class="style-popup-container"
@@ -1791,52 +2575,13 @@
         grid-template-columns: 1fr 1fr;
         gap: 0.75rem 0.5rem;
     }
-    .presets-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 0.5rem;
-    }
-    .preset-card {
-        background: var(--bg-header);
-        border: 1px solid var(--border-light);
-        border-radius: 4px;
-        padding: 8px;
-        cursor: pointer;
-        color: #ddd;
-        text-align: center;
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-    }
-    .preset-card:hover {
-        background: var(--border-light);
-    }
-    .preset-preview {
-        height: 40px;
-        background: #333;
-        border-radius: 2px;
-        position: relative;
-        overflow: hidden;
-    }
-    .fade-in::after {
-        content: "";
-        position: absolute;
-        inset: 0;
-        background: linear-gradient(to right, #000, #fff);
-    }
-    .fade-out::after {
-        content: "";
-        position: absolute;
-        inset: 0;
-        background: linear-gradient(to left, #000, #fff);
-    }
-
     .toolbar-mini {
         display: flex;
         gap: 0.25rem;
         margin-bottom: 0.25rem;
     }
-    .toolbar-mini button {
+    .toolbar-mini > button,
+    .toolbar-mini > .font-dropdown-container > button {
         background: var(--bg-header);
         border: 1px solid var(--border-light);
         color: #ccc;
@@ -1847,8 +2592,10 @@
         display: flex;
         align-items: center;
         justify-content: center;
+        border-radius: 4px;
     }
-    .toolbar-mini button:hover {
+    .toolbar-mini > button:hover,
+    .toolbar-mini > .font-dropdown-container > button:hover {
         background: var(--border-light);
         color: #fff;
     }
@@ -2022,6 +2769,52 @@
     }
 
     /* New Keyframe Edit List Styles */
+    .preset-controls-row {
+        display: flex;
+        gap: 0.25rem;
+        margin-bottom: 1rem;
+        align-items: center;
+    }
+    .preset-select {
+        flex: 1;
+        background: var(--bg-input);
+        border: 1px solid var(--border-light);
+        color: var(--text-main);
+        font-size: 0.8rem;
+        padding: 4px;
+        border-radius: 4px;
+        height: 28px;
+    }
+    .preset-icon-btn {
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: none;
+        border: 1px solid var(--border-light);
+        color: var(--text-dim);
+        border-radius: 4px;
+        cursor: pointer;
+    }
+    .preset-icon-btn:hover:not(:disabled) {
+        background: rgba(255, 255, 255, 0.05);
+    }
+    .preset-icon-btn.p-accent {
+        color: var(--accent);
+        border-color: var(--accent);
+    }
+    .preset-icon-btn.p-accent:hover:not(:disabled) {
+        background: rgba(74, 144, 226, 0.1);
+    }
+    .preset-icon-btn:disabled {
+        opacity: 0.3;
+        cursor: not-allowed;
+    }
+
+    /* New Keyframe Edit List Styles */
     .kf-edit-list {
         margin-top: 0.5rem;
         display: flex;
@@ -2098,13 +2891,6 @@
         color: #f55 !important;
     }
 
-    .color-preview {
-        width: 24px;
-        height: 24px;
-        border-radius: 50%;
-        border: 1px solid var(--border-light);
-        flex-shrink: 0;
-    }
     .keyframes-scroll-area {
         max-height: 400px;
         overflow-y: auto;
@@ -2116,20 +2902,6 @@
         display: flex;
         gap: 0.5rem;
         align-items: center;
-    }
-    .more-styles-btn {
-        background: var(--bg-header);
-        border: 1px solid var(--border-light);
-        color: var(--text-dim);
-        padding: 0.5rem;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 0.8rem;
-        white-space: nowrap;
-    }
-    .more-styles-btn:hover {
-        color: var(--text-main);
-        background: var(--border-light);
     }
 
     .style-popup {
@@ -2225,14 +2997,6 @@
     .popup-row input[type="checkbox"] {
         width: auto;
     }
-    .popup-row select {
-        flex: 1;
-        background: var(--bg-input);
-        color: var(--text-main);
-        border: 1px solid var(--border-light);
-        padding: 0.25rem;
-        border-radius: 3px;
-    }
     .popup-footer {
         padding: 1rem;
         border-top: 1px solid var(--border-dark);
@@ -2250,25 +3014,6 @@
     }
     .ok-btn:hover {
         opacity: 0.9;
-    }
-
-    /* Edge Effect Checkboxes */
-    .edge-check-group {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 0.3rem 0.75rem;
-        flex: 1;
-    }
-    .edge-check-label {
-        display: flex;
-        align-items: center;
-        gap: 0.3rem;
-        font-size: 0.8rem;
-        color: var(--text-main);
-        cursor: pointer;
-    }
-    .edge-check-label input[type="checkbox"] {
-        margin: 0;
     }
 
     /* Docked Content Styles */
@@ -2289,40 +3034,419 @@
         padding-bottom: 2rem;
     }
 
-    .edge-check-label input[type="checkbox"] {
-        width: auto;
-        margin: 0;
-        accent-color: var(--accent);
+    /* Effect Tab Styles */
+    .effect-tab-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1rem;
+        font-size: 0.9rem;
+        color: var(--accent);
     }
-    .edge-checks {
-        align-items: flex-start;
+    .add-effect-select {
+        background: var(--bg-input);
+        color: var(--text-main);
+        border: 1px solid var(--border-light);
+        border-radius: 4px;
+        padding: 0.25rem 0.5rem;
+        font-size: 0.75rem;
+        cursor: pointer;
+    }
+    .effects-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+    }
+    .effect-item-card {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid var(--border-light);
+        border-radius: 6px;
+        padding: 0.75rem;
+    }
+    .effect-item-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.75rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .effect-label {
+        font-size: 0.85rem;
+        font-weight: 500;
+        color: #fff;
     }
 
-    /* Edge Tabs */
-    .edge-tabs {
+    .param-label-group {
         display: flex;
-        gap: 0.25rem;
-        margin-top: 0.75rem;
-        margin-bottom: 0.5rem;
-        border-bottom: 1px solid var(--border-light);
-        padding-bottom: 0.25rem;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.25rem;
     }
-    .edge-tab {
+
+    .param-label-group label {
+        font-size: 0.8rem;
+        color: #a6adc8;
+    }
+
+    .mini-btn-icon.kf-toggle {
+        opacity: 0.5;
+        transition: all 0.2s;
+        border: none;
+        background: transparent;
+        color: #a6adc8;
+        cursor: pointer;
+        padding: 2px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 4px;
+    }
+
+    .mini-btn-icon.kf-toggle:hover {
+        opacity: 1;
+        background: rgba(255, 255, 255, 0.1);
+        color: #fff;
+    }
+
+    .mini-btn-icon.kf-toggle.active {
+        opacity: 1;
+        color: var(--accent, #89b4fa);
+    }
+
+    .num-val {
+        font-size: 0.75rem;
+        color: #a6adc8;
+        min-width: 25px;
+        text-align: right;
+    }
+
+    .param-input-group {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex: 1;
+    }
+
+    .param-input-group input[type="range"] {
+        flex: 1;
+    }
+    .delete-effect {
+        opacity: 0.5;
+    }
+    .delete-effect:hover {
+        opacity: 1;
+        color: #f55 !important;
+    }
+    .effect-params {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+    .param-row {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+    }
+    .param-row label {
+        width: 80px;
+        margin: 0;
+        font-size: 0.75rem;
+        color: var(--text-dim);
+    }
+    .param-input-wrap {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .param-val {
+        font-size: 0.7rem;
+        color: var(--text-muted);
+        min-width: 30px;
+        text-align: right;
+    }
+    .param-input-wrap input[type="range"] {
+        flex: 1;
+    }
+    .param-input-wrap input[type="color"] {
+        width: 100%;
+        height: 24px;
+        border: none;
+        padding: 0;
+        background: none;
+    }
+
+    /* Keyframe Buttons in Effects */
+    .kf-btn,
+    .kf-add-btn {
         background: transparent;
         border: none;
-        color: var(--text-dim);
-        font-size: 0.75rem;
-        padding: 0.25rem 0.5rem;
+        color: var(--text-muted);
+        padding: 4px;
         cursor: pointer;
-        border-radius: 3px;
-        text-transform: capitalize;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s;
+        border-radius: 4px;
     }
-    .edge-tab:hover {
+    .kf-btn:hover,
+    .kf-add-btn:hover {
         background: var(--bg-hover);
         color: var(--text-main);
     }
-    .edge-tab.active {
+    .kf-btn.active {
+        color: var(--accent);
+    }
+    .kf-add-btn:hover {
+        color: #fff;
+        background: rgba(255, 255, 255, 0.1);
+    }
+
+    /* Fade Shortcuts */
+    .fade-shortcuts {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 0.5rem;
+    }
+    .shortcut-btn {
+        flex: 1;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-light);
+        color: var(--text-dim);
+        font-size: 0.7rem;
+        padding: 0.3rem;
+        border-radius: 4px;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .shortcut-btn:hover {
         background: var(--accent);
         color: #fff;
+        border-color: var(--accent);
+    }
+
+    /* Edge Effect Tabs */
+    .edge-tabs-container {
+        display: flex;
+        background: var(--bg-header);
+        border: 1px solid var(--border-light);
+        border-radius: 4px;
+        margin-bottom: 0.75rem;
+        overflow: hidden;
+    }
+
+    .edge-tab-item {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.35rem;
+        padding: 0.5rem 0.25rem;
+        cursor: pointer;
+        font-size: 0.8rem;
+        color: var(--text-dim);
+        border-right: 1px solid var(--border-light);
+        background: rgba(255, 255, 255, 0.02);
+        transition: all 0.2s;
+    }
+
+    .edge-tab-item:last-child {
+        border-right: none;
+    }
+
+    .edge-tab-item:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text-main);
+    }
+
+    .edge-tab-item.active {
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+    }
+
+    /* Ensure checkbox stands out on active/dark bg */
+    .edge-tab-item input[type="checkbox"] {
+        cursor: pointer;
+        margin: 0;
+        accent-color: #fff; /* White check when active */
+    }
+
+    /* Inactive state checkbox accent */
+    /* Effect Tracks List */
+    .effect-tracks-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+    .section-label {
+        font-size: 0.75rem;
+        color: var(--text-dim);
+        text-transform: uppercase;
+        margin-bottom: 0.5rem;
+    }
+    .effect-track-item {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        background: var(--bg-header);
+        border: 1px solid var(--border-light);
+        padding: 0.5rem;
+        border-radius: 4px;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .effect-track-item:hover {
+        background: var(--bg-hover);
+        border-color: var(--accent);
+    }
+    .track-icon {
+        color: var(--accent);
+        display: flex;
+        align-items: center;
+    }
+    .track-info {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+    }
+    .track-name {
+        font-size: 0.85rem;
+        font-weight: 500;
+        color: var(--text-main);
+    }
+    .track-meta {
+        font-size: 0.7rem;
+        color: var(--text-muted);
+    }
+    .track-edit-btn {
+        background: none;
+        border: none;
+        color: var(--text-dim);
+        cursor: pointer;
+        padding: 4px;
+    }
+    .track-edit-btn:hover {
+        color: #fff;
+    }
+    .empty-tracks {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        text-align: center;
+        padding: 1rem;
+        border: 1px dashed var(--border-light);
+        border-radius: 4px;
+    }
+
+    /* Preset Controls */
+    .preset-controls-row {
+        display: flex;
+        gap: 0.5rem;
+        padding: 0 0.5rem;
+        margin-bottom: 1rem;
+        align-items: center;
+    }
+    .preset-select {
+        flex: 1;
+        background: var(--bg-input);
+        border: 1px solid var(--border-light);
+        color: var(--text-main);
+        padding: 0.35rem;
+        border-radius: 4px;
+        font-size: 0.8rem;
+    }
+    .preset-icon-btn {
+        background: var(--bg-header);
+        border: 1px solid var(--border-light);
+        color: var(--text-dim);
+        padding: 0.35rem;
+        border-radius: 4px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s;
+    }
+    .preset-icon-btn:hover:not(:disabled) {
+        background: var(--bg-hover);
+        color: var(--accent);
+        border-color: var(--accent);
+    }
+    .preset-icon-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    /* Font Dropdown */
+    .font-dropdown-container {
+        position: relative;
+        display: inline-block;
+        width: 24px;
+        height: 24px;
+    }
+    .font-btn {
+        background: var(--bg-header);
+        border: 1px solid var(--border-light);
+        color: #ccc;
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 4px;
+        transition: all 0.2s;
+    }
+    .font-btn:hover {
+        background: var(--border-light);
+        color: #fff;
+    }
+    .font-menu {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        margin-top: 5px;
+        background: var(--bg-header);
+        border: 1px solid var(--border-light);
+        border-radius: 4px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+        z-index: 1000;
+        width: fit-content;
+        min-width: 160px;
+        max-height: 400px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        padding: 4px;
+        box-sizing: border-box;
+    }
+    .font-menu-item {
+        all: unset;
+        display: block;
+        width: 100%;
+        height: auto;
+        padding: 8px 12px;
+        color: var(--text-main);
+        cursor: pointer;
+        border-radius: 4px;
+        font-size: 0.9rem;
+        transition: background 0.2s;
+        white-space: nowrap;
+        box-sizing: border-box;
+        text-align: right;
+        background: transparent !important;
+        border: none !important;
+    }
+    .font-menu-item::before,
+    .font-menu-item::after {
+        content: none !important;
+        display: none !important;
+    }
+    .font-menu-item:hover {
+        background: var(--bg-hover);
+        color: var(--accent);
     }
 </style>

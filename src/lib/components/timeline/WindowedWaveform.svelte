@@ -372,7 +372,6 @@
 
 <div class="waveform-container">
     <div class="controls">
-        <span class="label">Waveform View:</span>
         <button
             onclick={() => (windowSizeMs = 2500)}
             class:active={Math.abs(windowSizeMs - 2500) < 100}>±2.5s</button
@@ -422,11 +421,6 @@
         padding: 0.25rem 0.5rem;
         background: #222;
         border-bottom: 1px solid #333;
-    }
-    .label {
-        color: #888;
-        font-size: 0.8rem;
-        margin-right: 0.5rem;
     }
     button {
         background: #333;

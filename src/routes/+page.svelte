@@ -347,11 +347,8 @@
             style="flex: 1; overflow: hidden; display: flex; flex-direction: column;"
         >
             <div
-                style="padding: 0.5rem; background: #222; border-bottom: 1px solid #333; display: flex; justify-content: space-between;"
+                style="padding: 0.5rem; background: #222; border-bottom: 1px solid #333; display: flex; justify-content: flex-start;"
             >
-                <h3 style="margin: 0; font-size: 0.9rem; color: #ccc;">
-                    {t("tracks")}
-                </h3>
                 <button
                     onclick={() => projectStore.addTrack()}
                     style="font-size: 0.8rem; padding: 2px 6px;"
@@ -377,12 +374,6 @@
     button:hover {
         background: #444;
     }
-    h3 {
-        margin-top: 0;
-        border-bottom: 1px solid #444;
-        padding-bottom: 0.5rem;
-    }
-
     .options-popup {
         position: absolute;
         top: 100%;

@@ -105,7 +105,6 @@
         role="row"
         tabindex="0"
     >
-        <div class="track-name" title={track.name}>{track.name}</div>
         <div class="track-btns">
             <button
                 class="track-btn magnet-btn"
@@ -136,13 +135,11 @@
                 🗑️
             </button>
         </div>
-        <!-- Resize handle -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div
+        <button
             class="resize-handle"
             onmousedown={handleResizeMouseDown}
-            role="separator"
-        ></div>
+            aria-label="Resize track height"
+        ></button>
     </div>
 {:else}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -155,19 +152,23 @@
         role="row"
         tabindex="0"
         onkeydown={(e) => {
-            if (e.key === "Enter" || e.key === " ") handleTrackClick();
+            if (e.key === " ") {
+                e.preventDefault();
+                projectStore.setIsPlaying(!projectStore.isPlaying);
+            } else if (e.key === "Enter") {
+                handleTrackClick();
+            }
         }}
     >
         {#each track.cues as cue (cue.id)}
             <TimelineCue {cue} {pixelsPerSecond} trackId={track.id} />
         {/each}
 
-        <!-- Resize handle sync? (usually just one is enough, putting it in content too helps visual) -->
-        <div
+        <button
             class="resize-handle"
             onmousedown={handleResizeMouseDown}
-            role="separator"
-        ></div>
+            aria-label="Resize track height"
+        ></button>
     </div>
 {/if}
 
@@ -200,15 +201,6 @@
     }
     .track-content-only {
         min-width: 100%;
-    }
-
-    .track-name {
-        font-size: 0.75rem;
-        color: var(--text-main);
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        font-weight: 500;
     }
 
     .track-btns {

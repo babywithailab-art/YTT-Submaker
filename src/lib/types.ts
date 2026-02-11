@@ -69,6 +69,7 @@ export interface StyleProps {
   shadowOffsetY?: number;
   backgroundColor?: string;
   backgroundAlpha?: number;
+  borderRadius?: number; // px
   align?: 'left' | 'center' | 'right';
   italic?: boolean;
   underline?: boolean;
@@ -82,6 +83,7 @@ export interface StyleProps {
     glow?: EdgeEffectConfig;
     bevel?: EdgeEffectConfig;
   };
+  rubyEnabled?: boolean;
 }
 
 export interface Cue {
@@ -105,6 +107,7 @@ export interface Span {
 export interface Effect {
   id: string;
   type: string;
+  enabled: boolean;
   params: Record<string, any>;
 }
 

@@ -2,6 +2,7 @@
     import { projectStore } from "$lib/stores/projectStore.svelte";
     import { getStyledSegments } from "$lib/utils/text";
     import { interpolate } from "$lib/utils/animation";
+    import { effectRegistry } from "$lib/engine/effects";
     import type { Track, Cue } from "$lib/types";
 
     function getTrackValue<T>(
@@ -34,6 +35,14 @@
         return currentVal;
     }
 
+    function getAlignX(cue: Cue): string {
+        const align = cue.spans?.find((s) => s.stylePatch.align)?.stylePatch
+            .align;
+        if (align === "left") return "0%";
+        if (align === "right") return "-100%";
+        return "-50%";
+    }
+
     let activeItems = $derived.by(() => {
         if (!projectStore.project) return [];
         const t = projectStore.currentTime;
@@ -43,6 +52,9 @@
             style: any;
             transform: any;
             opacity: number;
+            effectStyles: string;
+            effectClasses: string[];
+            wrappedText?: string;
         }[] = [];
 
         for (const track of projectStore.project.tracks) {
@@ -68,7 +80,7 @@
                     // 3. Fallback to trackTransform
                     const pos = cue.posOverride;
 
-                    const finalTransform = {
+                    let finalTransform: any = {
                         xNorm: getCueValue(
                             cue,
                             "posOverride.xNorm",
@@ -95,14 +107,32 @@
                         ),
                     };
 
-                    const opacity = getCueValue(
-                        cue,
-                        "alpha",
-                        cue.styleOverride?.alpha ??
-                            track.defaultStyle.alpha ??
-                            1,
+                    // 1. Calculate Track Opacity (Animated)
+                    const trackOpacity = getTrackValue(
+                        track,
+                        "defaultStyle.alpha",
+                        track.defaultStyle.alpha ?? 1,
                         t,
                     );
+
+                    // 2. Calculate Cue Opacity Override (Animated)
+                    // We check if styleOverride.alpha is set OR if there is an animation for it.
+                    const cueOpacityOverride = getCueValue(
+                        cue,
+                        "styleOverride.alpha",
+                        cue.styleOverride?.alpha,
+                        t,
+                    );
+
+                    // 3. Determine Base Opacity
+                    // If cueOverride is defined (number), use it. Else fall back to trackOpacity.
+                    const baseOpacity = cueOpacityOverride ?? trackOpacity;
+
+                    // 4. Apply "alpha" (Fade) Multiplier (concerns simple fade in/out)
+                    // If "alpha" track exists, it acts as a 0-1 multiplier on top of the base opacity.
+                    const fadeOpacity = getCueValue(cue, "alpha", 1, t);
+
+                    let opacity = baseOpacity * fadeOpacity;
 
                     let finalStyle = {
                         ...track.defaultStyle,
@@ -155,12 +185,112 @@
                         }
                     }
 
+                    let finalEffectStyles = "";
+                    let effectClasses: string[] = [];
+                    let wrappedText: string | undefined = undefined;
+
+                    if (cue.effects) {
+                        // Priority: Style/Other (0) -> Color (1).
+                        // Lower priority applies first, Higher priority applies last (overriding).
+                        // Note: User order within same category is preserved.
+                        const sortedEffects = [...cue.effects].sort((a, b) => {
+                            const pA = effectRegistry.get(a.type);
+                            const pB = effectRegistry.get(b.type);
+                            // If plugin missing, treat as lowest priority (0)
+                            const catA = pA?.category === "color" ? 1 : 0;
+                            const catB = pB?.category === "color" ? 1 : 0;
+
+                            if (catA !== catB) return catA - catB;
+                            // If same category, keep original index (stable sort logic)
+                            // Since we use sort(), it depends on browser stability, but typically we want index check.
+                            const idxA = cue.effects?.indexOf(a) ?? -1;
+                            const idxB = cue.effects?.indexOf(b) ?? -1;
+                            return idxA - idxB;
+                        });
+
+                        for (const effect of sortedEffects) {
+                            const plugin = effectRegistry.get(effect.type);
+                            if (plugin) {
+                                // Interpolate parameters
+                                const interpolatedParams = { ...effect.params };
+                                for (const p of plugin.parameters) {
+                                    if (
+                                        p.type === "number" ||
+                                        p.type === "color"
+                                    ) {
+                                        const path = `effects.${effect.id}.${p.id}`;
+                                        interpolatedParams[p.id] = getCueValue(
+                                            cue,
+                                            path,
+                                            effect.params[p.id] ?? p.default,
+                                            t,
+                                        );
+                                    }
+                                }
+
+                                const result = plugin.apply(
+                                    interpolatedParams,
+                                    {
+                                        t: t - cue.startMs,
+                                        duration: cue.endMs - cue.startMs,
+                                        text: cue.plainText,
+                                    },
+                                );
+
+                                if (result.styles) {
+                                    if (result.styles.opacity !== undefined) {
+                                        opacity *= result.styles.opacity;
+                                    }
+                                    if (result.styles.transform) {
+                                        // @ts-ignore
+                                        finalTransform.effectTransform =
+                                            (finalTransform.effectTransform ||
+                                                "") +
+                                            " " +
+                                            result.styles.transform;
+                                    }
+                                    if (result.styles.filter) {
+                                        finalEffectStyles += `filter: ${result.styles.filter}; `;
+                                    }
+
+                                    // Handle other styles
+                                    for (const [key, val] of Object.entries(
+                                        result.styles,
+                                    )) {
+                                        if (
+                                            ![
+                                                "opacity",
+                                                "transform",
+                                                "filter",
+                                            ].includes(key)
+                                        ) {
+                                            // Append to override previous
+                                            finalEffectStyles += `${key}: ${val}; `;
+                                        }
+                                    }
+                                }
+
+                                if (result.className) {
+                                    effectClasses.push(result.className);
+                                }
+                                if (result.textWrapper) {
+                                    wrappedText = result.textWrapper(
+                                        wrappedText ?? cue.plainText,
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     items.push({
                         cue,
                         trackId: track.id,
                         style: finalStyle,
                         transform: finalTransform,
                         opacity,
+                        effectStyles: finalEffectStyles,
+                        effectClasses,
+                        wrappedText,
                     });
                 }
             }
@@ -513,33 +643,220 @@
         window.addEventListener("mousemove", onMove);
         window.addEventListener("mouseup", onUp);
     }
+
+    function handleRotateMouseDown(e: MouseEvent, trackId: string, cue: Cue) {
+        e.stopPropagation();
+        e.preventDefault();
+
+        if (!containerEl) return;
+
+        // We need the center of the element to calculate angle
+        const target = e.currentTarget as HTMLElement; // The handle
+        const cueEl = target.parentElement as HTMLElement; // The cue-line div
+        const rect = cueEl.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+
+        const startAngle = Math.atan2(e.clientY - centerY, e.clientX - centerX);
+
+        // Initialize posOverride if needed (same as move)
+        if (!cue.posOverride) {
+            const track = projectStore.project.tracks.find(
+                (t) => t.id === trackId,
+            );
+            cue.posOverride = {
+                xNorm: track?.transform.xNorm ?? 0.5,
+                yNorm: track?.transform.yNorm ?? 0.8,
+                scale: track?.transform.scale ?? 1,
+                rotation: track?.transform.rotation ?? 0,
+            };
+        }
+
+        const initialRotation = cue.posOverride.rotation ?? 0;
+        const initialPosOverride = JSON.parse(JSON.stringify(cue.posOverride));
+
+        const rotParam = "posOverride.rotation";
+        const rotAnimTrack = cue.animTracks.find(
+            (a) => a.paramPath === rotParam,
+        );
+        const t = projectStore.currentTime;
+        const existingKf = rotAnimTrack?.keyframes.find(
+            (k) => Math.abs(k.tMs - t) < 1,
+        );
+        const initialVal = existingKf ? existingKf.value : null;
+
+        function onMove(me: MouseEvent) {
+            const currentAngle = Math.atan2(
+                me.clientY - centerY,
+                me.clientX - centerX,
+            );
+            let delta = (currentAngle - startAngle) * (180 / Math.PI);
+
+            // Snap?
+            if (me.shiftKey) {
+                // Implement snap if needed
+            }
+
+            const newRotation = (initialRotation + delta) % 360;
+
+            // Update state
+            if (!cue.posOverride) return;
+            cue.posOverride.rotation = newRotation;
+
+            if (rotAnimTrack) {
+                if (existingKf) {
+                    existingKf.value = newRotation;
+                } else {
+                    // Keyframe auto-creation logic
+                    projectStore.addKeyframe(
+                        trackId,
+                        rotParam,
+                        {
+                            id: crypto.randomUUID(),
+                            tMs: t,
+                            value: newRotation,
+                            interp: "linear",
+                        },
+                        cue.id,
+                    );
+                }
+            } else {
+                projectStore.project.updatedAt = new Date().toISOString();
+            }
+        }
+
+        function onUp(me: MouseEvent) {
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", onUp);
+
+            const currentAngle = Math.atan2(
+                me.clientY - centerY,
+                me.clientX - centerX,
+            );
+            let delta = (currentAngle - startAngle) * (180 / Math.PI);
+            const finalRotation = (initialRotation + delta) % 360;
+
+            if (rotAnimTrack) {
+                if (existingKf) {
+                    // Revert locally then execute command to be safe/correct with Undo
+                    existingKf.value = initialVal;
+                    commandManager.execute(
+                        new UpdateKeyframeValueCommand(
+                            trackId,
+                            rotParam,
+                            t,
+                            finalRotation,
+                            cue.id,
+                        ),
+                    );
+                } else {
+                    // We added a temp keyframe, remove it then properly add via command
+                    projectStore.removeKeyframe(trackId, rotParam, t, cue.id);
+                    commandManager.execute(
+                        new AddKeyframeCommand(
+                            trackId,
+                            rotParam,
+                            {
+                                id: crypto.randomUUID(),
+                                tMs: t,
+                                value: finalRotation,
+                                interp: "linear",
+                            },
+                            cue.id,
+                        ),
+                    );
+                }
+            } else {
+                // Static update
+                cue.posOverride = initialPosOverride;
+                commandManager.execute(
+                    new UpdateCuePositionCommand(
+                        trackId,
+                        cue.id,
+                        initialPosOverride,
+                        { ...initialPosOverride, rotation: finalRotation },
+                    ),
+                );
+            }
+        }
+
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onUp);
+    }
 </script>
 
 <div class="overlay-container" bind:this={containerEl}>
-    {#each activeItems as { cue, trackId, style, transform, opacity }}
+    {#each activeItems as { cue, trackId, style, transform, opacity, effectStyles, effectClasses, wrappedText }}
         {@const isSelected = projectStore.selectedCueIds.has(cue.id)}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
-            class="cue-line"
+            class="cue-line {effectClasses.join(' ')}"
             class:selected={isSelected}
             style:font-size="{style.fontSize || 24}px"
             style:color={style.color || "#ffffff"}
             style:left="{transform.xNorm * 100}%"
             style:top="{transform.yNorm * 100}%"
             style:opacity
-            style="{getBackgroundStyles(style)} {getEdgeStyles(style)}"
-            style:transform="translate(-50%, -50%) scale({transform.scale})
-            rotate({transform.rotation}deg)"
+            style:text-align={(() => {
+                const alignSpan = cue.spans?.find((s) => s.stylePatch.align);
+                return alignSpan?.stylePatch.align || "left";
+            })()}
+            style="{getBackgroundStyles(style)} {getEdgeStyles(
+                style,
+            )} {effectStyles}"
+            style:transform="translate({getAlignX(cue)}, -50%) scale({transform.scale})
+            rotate({transform.rotation}deg) {transform.effectTransform || ''}"
             onmousedown={(e) => handleSubtitleMouseDown(e, trackId, cue)}
         >
-            {#each getStyledSegments(cue.plainText, cue.spans || []) as segment}
-                <span
-                    style:font-weight={segment.style.fontWeight}
-                    style:color={segment.style.color}
-                    style:font-family={segment.style.fontFamily}
-                    class="subtitle-text">{segment.text}</span
+            {#if isSelected}
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div
+                    class="rotate-handle"
+                    onmousedown={(e) => handleRotateMouseDown(e, trackId, cue)}
                 >
-            {/each}
+                    <div class="rotate-knob"></div>
+                </div>
+            {/if}
+
+            {#if wrappedText !== undefined}
+                <div class="subtitle-text" style="white-space: pre;">
+                    {@html wrappedText}
+                </div>
+            {:else}
+                {#each getStyledSegments(cue.plainText, cue.spans || []) as segment}
+                    <!-- Helper function for text decoration since we need both underline and line-through -->
+                    {@const textDecoration = (() => {
+                        const lines = [];
+                        if (segment.style.underline) lines.push("underline");
+                        if (segment.style.lineThrough)
+                            lines.push("line-through");
+                        return lines.length > 0 ? lines.join(" ") : "none";
+                    })()}
+
+                    {@const styles = `
+                        font-weight: ${segment.style.fontWeight || "normal"};
+                        font-style: ${segment.style.italic ? "italic" : "normal"};
+                        text-decoration: ${textDecoration};
+                        color: ${segment.style.color || "inherit"};
+                        font-family: ${segment.style.fontFamily || "inherit"};
+                        white-space: pre;
+                    `}
+
+                    <span style={styles} class="subtitle-text">
+                        {#if segment.style.rubyEnabled}
+                            {@html (() => {
+                                // Simple regex for [Base/Ruby]
+                                return segment.text.replace(
+                                    /\[(.*?)\/(.*?)\]/g,
+                                    "<ruby>$1<rt>$2</rt></ruby>",
+                                );
+                            })()}
+                        {:else}
+                            {segment.text}
+                        {/if}
+                    </span>
+                {/each}
+            {/if}
         </div>
     {/each}
 </div>
@@ -557,15 +874,17 @@
     }
     .cue-line {
         position: absolute;
-        text-align: center;
-        width: auto;
-        white-space: nowrap;
+        display: block;
+        width: fit-content;
+        min-width: max-content;
+        white-space: pre; /* Support newlines, no auto-wrap */
         pointer-events: auto;
         cursor: grab;
         padding: 4px 8px;
         border-radius: 4px;
         border: 2px solid transparent;
         transition: border-color 0.15s;
+        overflow: visible;
     }
     .cue-line:hover {
         border-color: rgba(255, 255, 255, 0.4);
@@ -581,5 +900,39 @@
         color: inherit;
         font-family: sans-serif;
         line-height: 1.2;
+        white-space: pre; /* Ensure consistency for wrappedText and segments */
+    }
+
+    .rotate-handle {
+        position: absolute;
+        top: -30px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 2px;
+        height: 30px;
+        background: var(--accent, #4a90e2);
+        cursor: grab;
+        z-index: 100;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        /* Prevent rotation of handle itself from messing up mouse calc? 
+           No, it's inside the rotated div, so it rotates WITH the div. 
+           This is actually good for visual feedback, but might make atan2 math tricky if not careful using client coords.
+           We used client coords in logic, so it should be fine. */
+    }
+    .rotate-knob {
+        width: 10px;
+        height: 10px;
+        background: #fff;
+        border: 2px solid var(--accent, #4a90e2);
+        border-radius: 50%;
+        position: absolute;
+        top: -5px; /* Half of knob size */
+        cursor: grab;
+    }
+    .rotate-handle:active,
+    .rotate-knob:active {
+        cursor: grabbing;
     }
 </style>

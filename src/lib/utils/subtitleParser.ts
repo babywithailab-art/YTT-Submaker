@@ -150,11 +150,17 @@ function formatAssTime(ms: number): string {
     return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`;
 }
 
+// Helper to format Ruby text [Base/Ruby] -> Base(Ruby) for export
+function formatRubyForExport(text: string): string {
+    return text.replace(/\[(.*?)\/(.*?)\]/g, '$1($2)');
+}
+
 export function cuesToSRT(cues: Cue[]): string {
     return cues.map((cue, index) => {
         const indexLine = (index + 1).toString();
         const timeLine = `${formatSrtTime(cue.startMs)} --> ${formatSrtTime(cue.endMs)}`;
-        return `${indexLine}\n${timeLine}\n${cue.plainText}\n`;
+        const text = formatRubyForExport(cue.plainText);
+        return `${indexLine}\n${timeLine}\n${text}\n`;
     }).join('\n');
 }
 
@@ -178,8 +184,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     const events = cues.map(cue => {
         const start = formatAssTime(cue.startMs);
         const end = formatAssTime(cue.endMs);
+        // Format Ruby first
+        let text = formatRubyForExport(cue.plainText);
         // Replace newlines with \N
-        const text = cue.plainText.replace(/\n/g, '\\N');
+        text = text.replace(/\n/g, '\\N');
         return `Dialogue: 0,${start},${end},Default,,0,0,0,,${text}`;
     }).join('\n');
 
@@ -274,7 +282,8 @@ export function cuesToYTT(cues: Cue[]): string {
                 xml += `    <pen id="${penId}" ${penAttr} />\n`;
             }
 
-            const escapedText = cue.plainText
+            const formattedText = formatRubyForExport(cue.plainText);
+            const escapedText = formattedText
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')
@@ -298,6 +307,10 @@ export function cuesToYTT(cues: Cue[]): string {
             const basePos = cue.posOverride || { xNorm: 0.5, yNorm: 0.95, scale: 1, rotation: 0 };
             const baseStyle = cue.styleOverride || { color: '#FFFFFF', fontSize: 24, alpha: 1, backgroundAlpha: 0.5 };
 
+            // Glitch Effect Check
+            const glitchEffect = cue.effects?.find(e => e.type === 'glitch' && e.enabled);
+            const isGlitch = !!glitchEffect;
+
             for (let t = cue.startMs; t < cue.endMs; t += INTERVAL) {
                 // Determine duration of this frame
                 // Clamp to endMs
@@ -313,68 +326,112 @@ export function cuesToYTT(cues: Cue[]): string {
                 const alpha = getValue("alpha", baseStyle.alpha ?? 1.0, t);
                 const bgAlpha = getValue("backgroundAlpha", baseStyle.backgroundAlpha ?? 0.5, t);
 
-                // --- Generate WP (Position) ---
-                let wpId = 0;
-                // Always use standard anchor 7 for mapping x/y
-                const anchor = 7;
-                const key = `${xNorm.toFixed(3)}-${yNorm.toFixed(3)}-${anchor}`;
-                if (wpMap.has(key)) {
-                    wpId = wpMap.get(key)!;
+                // --- Generate Layers (Glitch vs Normal) ---
+                const layers = [];
+
+                if (isGlitch) {
+                    const params = glitchEffect!.params || {};
+                    const intensity = params.intensity ?? 5; // Use as general probability/scale if needed
+                    const jX = params.jitterX ?? 5;
+                    const jY = params.jitterY ?? 2;
+                    // Colors
+                    const c1 = params.color1 ?? '#FF00C1';
+                    const c2 = params.color2 ?? '#00FFF9';
+                    const c3 = params.color3 ?? '#FFFFFF';
+
+                    // Convert pixel jitter to normalized coords roughly
+                    // Assuming 720p base for calculation (YTT doesn't have fixed px)
+                    // standard YTT: 100 ah = 100% width.
+                    // xNorm 0-1.
+                    // Let's assume 1280x720. 1px ~ 0.00078 width.
+                    const pxToNormX = 1 / 1280;
+                    const pxToNormY = 1 / 720;
+
+                    const jXNorm = jX * pxToNormX;
+                    const jYNorm = jY * pxToNormY;
+
+                    // Random offsets
+                    const rX1 = (Math.random() - 0.5) * jXNorm;
+                    const rY1 = (Math.random() - 0.5) * jYNorm;
+                    const rX2 = (Math.random() - 0.5) * jXNorm;
+                    const rY2 = (Math.random() - 0.5) * jYNorm;
+                    // Center jitter (maybe less?)
+                    const rXc = (Math.random() - 0.5) * jXNorm * 0.2;
+                    const rYc = (Math.random() - 0.5) * jYNorm * 0.2;
+
+                    layers.push({ x: xNorm + rX1, y: yNorm + rY1, color: c1, alpha: 0.7 });
+                    layers.push({ x: xNorm + rX2, y: yNorm + rY2, color: c2, alpha: 0.7 });
+                    layers.push({ x: xNorm + rXc, y: yNorm + rYc, color: c3, alpha: alpha });
                 } else {
-                    wpId = nextWpId++;
-                    wpMap.set(key, wpId);
-                    const ah = Math.round(xNorm * 100);
-                    const av = Math.round(yNorm * 100);
-                    xml += `    <wp id="${wpId}" ap="${anchor}" ah="${ah}" av="${av}" />\n`;
+                    layers.push({ x: xNorm, y: yNorm, color: baseStyle.color || '#FFFFFF', alpha: alpha });
                 }
 
-                // --- Generate WS (Background) ---
-                let wsId = 0;
-                // If bg color exists
-                if (baseStyle.backgroundColor) {
-                    const bgHex = baseStyle.backgroundColor.toUpperCase();
-                    // Animated alpha
-                    const bgAlphaInt = Math.round(bgAlpha * 255);
-                    const wsKey = `${bgHex}-${bgAlphaInt}`;
-                    if (wsMap.has(wsKey)) {
-                        wsId = wsMap.get(wsKey)!;
+                for (const layer of layers) {
+                    // --- Generate WP (Position) ---
+                    let wpId = 0;
+                    // Always use standard anchor 7 for mapping x/y
+                    const anchor = 7;
+                    // Clamp coords to 0-1 to verify valid YTT? (YTT can handle Out of bounds?)
+                    // Keep them raw for now.
+                    const key = `${layer.x.toFixed(4)}-${layer.y.toFixed(4)}-${anchor}`;
+
+                    if (wpMap.has(key)) {
+                        wpId = wpMap.get(key)!;
                     } else {
-                        wsId = nextWsId++;
-                        wsMap.set(wsKey, wsId);
-                        xml += `    <ws id="${wsId}" bc="${bgHex}" bo="${bgAlphaInt}" />\n`;
+                        wpId = nextWpId++;
+                        wpMap.set(key, wpId);
+                        const ah = Math.round(layer.x * 100);
+                        const av = Math.round(layer.y * 100);
+                        xml += `    <wp id="${wpId}" ap="${anchor}" ah="${ah}" av="${av}" />\n`;
                     }
+
+                    // --- Generate WS (Background) ---
+                    let wsId = 0;
+                    if (baseStyle.backgroundColor) {
+                        const bgHex = baseStyle.backgroundColor.toUpperCase();
+                        const bgAlphaInt = Math.round(bgAlpha * 255);
+                        const wsKey = `${bgHex}-${bgAlphaInt}`;
+                        if (wsMap.has(wsKey)) {
+                            wsId = wsMap.get(wsKey)!;
+                        } else {
+                            wsId = nextWsId++;
+                            wsMap.set(wsKey, wsId);
+                            xml += `    <ws id="${wsId}" bc="${bgHex}" bo="${bgAlphaInt}" />\n`;
+                        }
+                    }
+
+                    // --- Generate Pen (Text Color/Alpha) ---
+                    let penId = 0;
+                    const fc = (layer.color || '#FFFFFF').toUpperCase();
+                    // Animated alpha
+                    const fo = Math.round(layer.alpha * 255);
+                    const etMap: Record<string, number> = { 'none': 0, 'outline': 3, 'shadow': 4, 'glow': 3, 'bevel': 1 };
+                    // Use edgeTypes array (first entry) or fallback to edgeType
+                    const primaryEdge = (baseStyle.edgeTypes && baseStyle.edgeTypes.length > 0) ? baseStyle.edgeTypes[0] : (baseStyle.edgeType || 'none');
+                    const et = etMap[primaryEdge] ?? 0;
+                    const ec = (baseStyle.edgeColor || '#000000').toUpperCase();
+                    const penKey = `${fc}-${fo}-${et}-${ec}`;
+
+                    if (penMap.has(penKey)) {
+                        penId = penMap.get(penKey)!;
+                    } else {
+                        penId = nextPenId++;
+                        penMap.set(penKey, penId);
+                        let penAttr = `fc="${fc}" fo="${fo}"`;
+                        if (et > 0) penAttr += ` et="${et}" ec="${ec}"`;
+                        xml += `    <pen id="${penId}" ${penAttr} />\n`;
+                    }
+
+                    const formattedText = formatRubyForExport(cue.plainText);
+                    const escapedText = formattedText
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&apos;');
+
+                    buffer += `    <p t="${t}" d="${d}" wp="${wpId}" ws="${wsId}"><s p="${penId}">${escapedText}</s></p>\n`;
                 }
-
-                // --- Generate Pen (Text Color/Alpha) ---
-                let penId = 0;
-                const fc = (baseStyle.color || '#FFFFFF').toUpperCase();
-                // Animated alpha
-                const fo = Math.round(alpha * 255);
-                const etMap: Record<string, number> = { 'none': 0, 'outline': 3, 'shadow': 4, 'glow': 3, 'bevel': 1 };
-                // Use edgeTypes array (first entry) or fallback to edgeType
-                const primaryEdge = (baseStyle.edgeTypes && baseStyle.edgeTypes.length > 0) ? baseStyle.edgeTypes[0] : (baseStyle.edgeType || 'none');
-                const et = etMap[primaryEdge] ?? 0;
-                const ec = (baseStyle.edgeColor || '#000000').toUpperCase();
-                const penKey = `${fc}-${fo}-${et}-${ec}`;
-
-                if (penMap.has(penKey)) {
-                    penId = penMap.get(penKey)!;
-                } else {
-                    penId = nextPenId++;
-                    penMap.set(penKey, penId);
-                    let penAttr = `fc="${fc}" fo="${fo}"`;
-                    if (et > 0) penAttr += ` et="${et}" ec="${ec}"`;
-                    xml += `    <pen id="${penId}" ${penAttr} />\n`;
-                }
-
-                const escapedText = cue.plainText
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;')
-                    .replace(/"/g, '&quot;')
-                    .replace(/'/g, '&apos;');
-
-                buffer += `    <p t="${t}" d="${d}" wp="${wpId}" ws="${wsId}"><s p="${penId}">${escapedText}</s></p>\n`;
             }
             return buffer.trimEnd(); // Remove trailing newline
         }

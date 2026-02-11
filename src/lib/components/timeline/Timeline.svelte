@@ -142,6 +142,12 @@
                     role="slider"
                     tabindex="0"
                     aria-valuenow={projectStore.currentTime}
+                    onkeydown={(e) => {
+                        if (e.key === " ") {
+                            e.preventDefault();
+                            projectStore.setIsPlaying(!projectStore.isPlaying);
+                        }
+                    }}
                 >
                     <!-- Minor ticks -->
                     {#each { length: Math.ceil(duration / 1000 / minorTickInterval) } as _, i}

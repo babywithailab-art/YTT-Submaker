@@ -1,6 +1,7 @@
 
 import { projectStore } from '../stores/projectStore.svelte';
-import type { Project, Track, Cue } from '../types';
+import type { Project, Track, Cue, KeyframeTrack, Effect, StyleProps } from '../types';
+import type { AnimationPreset } from '../stores/presetStore.svelte';
 
 export interface Command {
     execute(): void;
@@ -193,7 +194,8 @@ export class TimeChangeCommand implements Command {
     }
 }
 
-import type { Span, StyleProps } from '../types';
+
+import type { Span } from '../types';
 
 export class AddSpanCommand implements Command {
     private createdSpan: Span | null = null;
@@ -662,6 +664,35 @@ export class UpdateKeyframeTimeCommand implements Command {
     }
 }
 
+export class ReorderEffectsCommand implements Command {
+    oldEffects: any[] = [];
+
+    constructor(
+        private trackId: string,
+        private cueId: string,
+        private newEffects: any[]
+    ) { }
+
+    execute() {
+        const track = projectStore.project.tracks.find(t => t.id === this.trackId);
+        if (!track) return;
+        const cue = track.cues.find((c) => c.id === this.cueId);
+        if (!cue) return;
+
+        this.oldEffects = [...(cue.effects || [])];
+        cue.effects = this.newEffects;
+    }
+
+    undo() {
+        const track = projectStore.project.tracks.find(t => t.id === this.trackId);
+        if (!track) return;
+        const cue = track.cues.find((c) => c.id === this.cueId);
+        if (!cue) return;
+
+        cue.effects = this.oldEffects;
+    }
+}
+
 export class RemoveTrackCommand implements Command {
     private removedTrack: Track | null = null;
     private removedIndex: number = -1;
@@ -681,5 +712,302 @@ export class RemoveTrackCommand implements Command {
         if (this.removedTrack && this.removedIndex !== -1) {
             projectStore.addTrackAt(this.removedTrack, this.removedIndex);
         }
+    }
+}
+
+export class AddEffectCommand implements Command {
+    private createdEffect: any = null;
+    constructor(
+        private trackId: string,
+        private effectType: string,
+        private params: Record<string, any> = {},
+        private cueId?: string
+    ) { }
+    execute() {
+        if (!this.createdEffect) {
+            this.createdEffect = projectStore.addEffect(this.trackId, this.effectType, this.params, this.cueId);
+        } else {
+            projectStore.restoreEffect(this.trackId, this.createdEffect, this.cueId);
+        }
+    }
+    undo() {
+        if (this.createdEffect) {
+            projectStore.removeEffect(this.trackId, this.createdEffect.id, this.cueId);
+        }
+    }
+}
+
+export class RemoveEffectCommand implements Command {
+    private removedEffect: any = null;
+    constructor(
+        private trackId: string,
+        private effectId: string,
+        private cueId?: string
+    ) { }
+    execute() {
+        const track = projectStore.project.tracks.find(t => t.id === this.trackId);
+        if (!track) return;
+        const target = this.cueId ? track.cues.find(c => c.id === this.cueId) : track;
+        if (!target) return;
+        const effects = this.cueId ? (target as any).effects : (target as any).trackEffects;
+        const effect = effects.find((e: any) => e.id === this.effectId);
+        if (effect) {
+            this.removedEffect = JSON.parse(JSON.stringify(effect));
+            projectStore.removeEffect(this.trackId, this.effectId, this.cueId);
+        }
+    }
+    undo() {
+        if (this.removedEffect) {
+            projectStore.restoreEffect(this.trackId, this.removedEffect, this.cueId);
+        }
+    }
+}
+
+export class UpdateEffectParamCommand implements Command {
+    constructor(
+        private trackId: string,
+        private effectId: string,
+        private oldParams: Record<string, any>,
+        private newParams: Record<string, any>,
+        private cueId?: string
+    ) { }
+    execute() {
+        projectStore.updateEffect(this.trackId, this.effectId, this.newParams, this.cueId);
+    }
+    undo() {
+        projectStore.updateEffect(this.trackId, this.effectId, this.oldParams, this.cueId);
+    }
+}
+
+export class ToggleSpanStyleCommand implements Command {
+    private originalSpans: Span[] = [];
+
+    constructor(
+        private trackId: string,
+        private cueId: string,
+        private startChar: number,
+        private endChar: number,
+        private styleProperty: keyof StyleProps,
+        private toggleValue: any = true // e.g., true for boolean, or specific value
+    ) { }
+
+    execute() {
+        const track = projectStore.project?.tracks.find(t => t.id === this.trackId);
+        const cue = track?.cues.find(c => c.id === this.cueId);
+        if (!cue) return;
+
+        // If it's alignment, we usually want it to apply to the entire cue
+        // regardless of selection, unless we want per-character alignment (rare).
+        // Let's force whole-cue for 'align' property.
+        if (this.styleProperty === 'align') {
+            this.startChar = 0;
+            this.endChar = cue.plainText.length;
+        }
+
+        // 1. Snapshot original spans for undo
+        this.originalSpans = JSON.parse(JSON.stringify(cue.spans));
+
+        // 2. Identify if we are adding or removing
+        let allHaveStyle = true;
+        const relevantSpans = cue.spans.filter(s =>
+            s.startChar < this.endChar && s.endChar > this.startChar
+        );
+
+        // Check if the range is fully covered by spans with this property
+        for (let i = this.startChar; i < this.endChar; i++) {
+            const spanAtChar = relevantSpans.find(s => i >= s.startChar && i < s.endChar);
+            if (!spanAtChar || spanAtChar.stylePatch[this.styleProperty] !== this.toggleValue) {
+                allHaveStyle = false;
+                break;
+            }
+        }
+
+        const shouldAdd = !allHaveStyle;
+
+        // 3. Apply the change
+        if (shouldAdd) {
+            this.applyStyle(cue, this.styleProperty, this.toggleValue);
+        } else {
+            this.removeStyle(cue, this.styleProperty);
+        }
+
+        // 4. Merge adjacent identical spans (cleanup)
+        this.mergeSpans(cue);
+
+        projectStore.project.updatedAt = new Date().toISOString();
+    }
+
+    private applyStyle(cue: Cue, prop: keyof StyleProps, val: any) {
+        this.removeStyle(cue, prop); // Clear range first to avoid duplicates/conflicts
+
+        this.splitSpansAt(cue, this.startChar);
+        this.splitSpansAt(cue, this.endChar);
+
+        // Update existing spans inside range
+        cue.spans.forEach(s => {
+            if (s.startChar >= this.startChar && s.endChar <= this.endChar) {
+                s.stylePatch[prop] = val;
+            }
+        });
+
+        // Fill gaps
+        cue.spans.sort((a, b) => a.startChar - b.startChar);
+
+        let currentPos = this.startChar;
+        const newSpans: Span[] = [];
+
+        const internalSpans = cue.spans.filter(s => s.startChar >= this.startChar && s.endChar <= this.endChar);
+
+        for (const span of internalSpans) {
+            if (span.startChar > currentPos) {
+                newSpans.push({
+                    startChar: currentPos,
+                    endChar: span.startChar,
+                    stylePatch: { [prop]: val }
+                });
+            }
+            currentPos = span.endChar;
+        }
+
+        if (currentPos < this.endChar) {
+            newSpans.push({
+                startChar: currentPos,
+                endChar: this.endChar,
+                stylePatch: { [prop]: val }
+            });
+        }
+
+        cue.spans.push(...newSpans);
+        cue.spans.sort((a, b) => a.startChar - b.startChar);
+    }
+
+    private removeStyle(cue: Cue, prop: keyof StyleProps) {
+        this.splitSpansAt(cue, this.startChar);
+        this.splitSpansAt(cue, this.endChar);
+
+        cue.spans.forEach(s => {
+            if (s.startChar >= this.startChar && s.endChar <= this.endChar) {
+                delete s.stylePatch[prop];
+            }
+        });
+
+        cue.spans = cue.spans.filter(s => Object.keys(s.stylePatch).length > 0);
+    }
+
+    private splitSpansAt(cue: Cue, splitPos: number) {
+        const toSplit = cue.spans.find(s => s.startChar < splitPos && s.endChar > splitPos);
+
+        if (toSplit) {
+            const rightHalf: Span = {
+                startChar: splitPos,
+                endChar: toSplit.endChar,
+                stylePatch: { ...toSplit.stylePatch }
+            };
+            toSplit.endChar = splitPos;
+            cue.spans.push(rightHalf);
+        }
+    }
+
+    private mergeSpans(cue: Cue) {
+        if (cue.spans.length < 2) return;
+
+        cue.spans.sort((a, b) => a.startChar - b.startChar);
+
+        const merged: Span[] = [];
+        let current = cue.spans[0];
+
+        for (let i = 1; i < cue.spans.length; i++) {
+            const next = cue.spans[i];
+
+            if (current.endChar === next.startChar && this.areStylesEqual(current.stylePatch, next.stylePatch)) {
+                current.endChar = next.endChar;
+            } else {
+                merged.push(current);
+                current = next;
+            }
+        }
+        merged.push(current);
+        cue.spans = merged;
+    }
+
+    private areStylesEqual(a: Partial<StyleProps>, b: Partial<StyleProps>) {
+        const kA = Object.keys(a).sort();
+        const kB = Object.keys(b).sort();
+        if (kA.length !== kB.length) return false;
+
+        for (let i = 0; i < kA.length; i++) {
+            const key = kA[i] as keyof StyleProps;
+            if (key !== kB[i]) return false;
+            if (a[key] !== b[key]) return false;
+        }
+        return true;
+    }
+
+    undo() {
+        const track = projectStore.project?.tracks.find(t => t.id === this.trackId);
+        const cue = track?.cues.find(c => c.id === this.cueId);
+        if (cue) {
+            cue.spans = JSON.parse(JSON.stringify(this.originalSpans));
+            projectStore.project.updatedAt = new Date().toISOString();
+        }
+    }
+}
+
+export class ApplyAnimationPresetCommand implements Command {
+    private oldAnimTracks: KeyframeTrack<any>[] = [];
+    private oldEffects: Effect[] = [];
+
+    constructor(
+        private trackId: string,
+        private cueId: string,
+        private preset: AnimationPreset
+    ) { }
+
+    execute() {
+        const track = projectStore.project?.tracks.find(t => t.id === this.trackId);
+        const cue = track?.cues.find(c => c.id === this.cueId);
+        if (!cue) return;
+
+        // Store current state for undo
+        this.oldAnimTracks = JSON.parse(JSON.stringify(cue.animTracks));
+        this.oldEffects = JSON.parse(JSON.stringify(cue.effects || []));
+
+        // Clear current
+        cue.animTracks = [];
+        cue.effects = [];
+
+        // Apply preset effects
+        if (this.preset.effects) {
+            cue.effects = JSON.parse(JSON.stringify(this.preset.effects));
+            // Fresh IDs for effects just in case (though presets have their own IDs, 
+            // maybe keep them or regen? Let's keep them so animation tracks match)
+        }
+
+        // Apply preset animation tracks
+        if (this.preset.animTracks) {
+            const clonedTracks: KeyframeTrack<any>[] = JSON.parse(JSON.stringify(this.preset.animTracks));
+
+            // Rebase keyframes to match the cue's start time
+            // Presets are assumed to be stored relative to 0ms (cue start)
+            for (const at of clonedTracks) {
+                at.targetId = cue.id;
+                for (const kf of at.keyframes) {
+                    kf.tMs = cue.startMs + kf.tMs;
+                }
+                cue.animTracks.push(at);
+            }
+        }
+
+        projectStore.project.updatedAt = new Date().toISOString();
+    }
+
+    undo() {
+        const track = projectStore.project?.tracks.find(t => t.id === this.trackId);
+        const cue = track?.cues.find(c => c.id === this.cueId);
+        if (!cue) return;
+
+        cue.animTracks = this.oldAnimTracks;
+        cue.effects = this.oldEffects;
+        projectStore.project.updatedAt = new Date().toISOString();
     }
 }

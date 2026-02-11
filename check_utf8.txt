@@ -1,0 +1,205 @@
+﻿
+> tauri-app@0.1.0 check
+> svelte-kit sync && svelte-check --tsconfig ./tsconfig.json
+
+Loading svelte-check in workspace: c:\Users\Goryeng\Desktop\Projects\YTT-Submaker
+Getting Svelte diagnostics...
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\lib\components\inspector\DetailedColorEditor.svelte[39m:406:25
+[33mWarn[39m: Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events (svelte)
+[36m
+                        [35m<div
+                            class="timeline-track"
+                            class:numeric={row.type === "number" ||
+                                row.type === "boolean"}
+                            style="background: {getGradient(track, row.type)}"
+                            onclick={(e) => {
+                                if (!cue || isResizing || isDragging) return;
+                                const rect = (
+                                    e.currentTarget as HTMLElement
+                                ).getBoundingClientRect();
+                                const pct =
+                                    (e.clientX - rect.left) / rect.width;
+                                const tMs =
+                                    cue.startMs +
+                                    pct * (cue.endMs - cue.startMs);
+                                projectStore.setTime(tMs);
+                            }}
+                            role="button"
+                            tabindex="0"
+                            aria-label="Timeline (Click to move playhead)"
+                        >
+                            {#if track}
+                                {#each track.keyframes as kf (kf.id)}
+                                    <div
+                                        class="kf-marker"
+                                        class:selected={selectedKfId === kf.id}
+                                        style="left: {((kf.tMs -
+                                            (cue?.startMs || 0)) /
+                                            ((cue?.endMs || 1000) -
+                                                (cue?.startMs || 0))) *
+                                            100}%"
+                                        onmousedown={(e) =>
+                                            handleKfMouseDown(
+                                                e,
+                                                isComposite ? row.ids : row.id,
+                                                kf,
+                                            )}
+                                        role="button"
+                                        tabindex="0"
+                                    >
+                                        <Diamond
+                                            size={16}
+                                            fill={selectedKfId === kf.id
+                                                ? "var(--accent)"
+                                                : row.type === "color" ||
+                                                    isComposite
+                                                  ? kf.value
+                                                  : "#fff"}
+                                            stroke={selectedKfId === kf.id
+                                                ? "#fff"
+                                                : "rgba(0,0,0,0.5)"}
+                                            stroke-width={2}
+                                        />
+                                    </div>
+                                {/each}
+                            {/if}
+                        </div>[36m
+                    </div>[39m
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\lib\components\inspector\Inspector.svelte[39m:2685:14
+[31mError[39m: {:...} block is invalid at this position (did you forget to close the preceding element or block?)
+https://svelte.dev/e/block_invalid_continuation_placement (svelte)
+[36m            {/if}
+            {[35m[36m:else if activeTab === "color-detail" && isDetailedEditorDocked && selectedData && editingEffectId}
+                <div class="style-dock-content">[39m
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\lib\components\inspector\Inspector.svelte[39m:2685:14
+[31mError[39m: {:...} block is invalid at this position (did you forget to close the preceding element or block?)
+https://svelte.dev/e/block_invalid_continuation_placement (ts)
+[36m            {/if}
+            {[35m[36m:else if activeTab === "color-detail" && isDetailedEditorDocked && selectedData && editingEffectId}
+                <div class="style-dock-content">[39m
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\lib\components\layout\MainLayout.svelte[39m:50:9
+[33mWarn[39m: Using `<slot>` to render parent content is deprecated. Use `{@render ...}` tags instead
+https://svelte.dev/e/slot_element_deprecated (svelte)
+[36m    <header class="toolbar">
+        [35m<slot name="toolbar"></slot>[36m
+    </header>[39m
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\lib\components\layout\MainLayout.svelte[39m:55:13
+[33mWarn[39m: Using `<slot>` to render parent content is deprecated. Use `{@render ...}` tags instead
+https://svelte.dev/e/slot_element_deprecated (svelte)
+[36m        <div class="preview-area">
+            [35m<slot name="preview">
+                <div class="placeholder">Video Preview</div>
+            </slot>[36m
+        </div>[39m
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\lib\components\layout\MainLayout.svelte[39m:61:9
+[33mWarn[39m: noninteractive element cannot have nonnegative tabIndex value
+https://svelte.dev/e/a11y_no_noninteractive_tabindex (svelte)
+[36m        <!-- Sidebar Resize Handle -->
+        [35m<div
+            class="resize-handle-v"
+            class:active={isDraggingSidebar}
+            onmousedown={handleSidebarDragStart}
+            role="separator"
+            tabindex="0"
+            aria-orientation="vertical"
+        ></div>[36m[39m
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\lib\components\layout\MainLayout.svelte[39m:61:9
+[33mWarn[39m: Non-interactive element `<div>` should not be assigned mouse or keyboard event listeners
+https://svelte.dev/e/a11y_no_noninteractive_element_interactions (svelte)
+[36m        <!-- Sidebar Resize Handle -->
+        [35m<div
+            class="resize-handle-v"
+            class:active={isDraggingSidebar}
+            onmousedown={handleSidebarDragStart}
+            role="separator"
+            tabindex="0"
+            aria-orientation="vertical"
+        ></div>[36m[39m
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\lib\components\layout\MainLayout.svelte[39m:71:13
+[33mWarn[39m: Using `<slot>` to render parent content is deprecated. Use `{@render ...}` tags instead
+https://svelte.dev/e/slot_element_deprecated (svelte)
+[36m        <aside class="sidebar-area" style="width: {sidebarWidth}px;">
+            [35m<slot name="sidebar">
+                <div class="placeholder">Inspector / Editor</div>
+            </slot>[36m
+        </aside>[39m
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\lib\components\layout\MainLayout.svelte[39m:78:5
+[33mWarn[39m: noninteractive element cannot have nonnegative tabIndex value
+https://svelte.dev/e/a11y_no_noninteractive_tabindex (svelte)
+[36m    <!-- Timeline Resize Handle -->
+    [35m<div
+        class="resize-handle-h"
+        class:active={isDraggingTimeline}
+        onmousedown={handleTimelineDragStart}
+        role="separator"
+        tabindex="0"
+        aria-orientation="horizontal"
+    ></div>[36m[39m
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\lib\components\layout\MainLayout.svelte[39m:78:5
+[33mWarn[39m: Non-interactive element `<div>` should not be assigned mouse or keyboard event listeners
+https://svelte.dev/e/a11y_no_noninteractive_element_interactions (svelte)
+[36m    <!-- Timeline Resize Handle -->
+    [35m<div
+        class="resize-handle-h"
+        class:active={isDraggingTimeline}
+        onmousedown={handleTimelineDragStart}
+        role="separator"
+        tabindex="0"
+        aria-orientation="horizontal"
+    ></div>[36m[39m
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\lib\components\layout\MainLayout.svelte[39m:88:9
+[33mWarn[39m: Using `<slot>` to render parent content is deprecated. Use `{@render ...}` tags instead
+https://svelte.dev/e/slot_element_deprecated (svelte)
+[36m    <div class="timeline-area" style="height: {timelineHeight}px;">
+        [35m<slot name="timeline">
+            <div class="placeholder">Timeline</div>
+        </slot>[36m
+    </div>[39m
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\lib\components\layout\MainLayout.svelte[39m:121:5
+[33mWarn[39m: Unused CSS selector ".logo"
+https://svelte.dev/e/css_unused_selector (svelte)
+[36m
+    [35m.logo[36m {
+        font-weight: bold;[39m
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\lib\components\player\SubtitleOverlay.svelte[39m:206:42
+[31mError[39m: 'cue.effects' is possibly 'undefined'. (ts)
+[36m                            // Since we use sort(), it depends on browser stability, but typically we want index check.
+                            const idxA = [35mcue.effects[36m.indexOf(a);
+                            const idxB = cue.effects.indexOf(b);[39m
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\lib\components\player\SubtitleOverlay.svelte[39m:207:42
+[31mError[39m: 'cue.effects' is possibly 'undefined'. (ts)
+[36m                            const idxA = cue.effects.indexOf(a);
+                            const idxB = [35mcue.effects[36m.indexOf(b);
+                            return idxA - idxB;[39m
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\lib\components\ui\ColorPicker.svelte[39m:13:24
+[33mWarn[39m: This reference only captures the initial value of `initialColor`. Did you mean to reference it inside a closure instead?
+https://svelte.dev/e/state_referenced_locally (svelte)
+[36m    // State
+    let color = $state([35minitialColor[36m);
+    let r = $state(255);[39m
+
+c:\Users\Goryeng\Desktop\Projects\YTT-Submaker\[32msrc\routes\+page.svelte[39m:13:12
+[31mError[39m: Module '"c:/Users/Goryeng/Desktop/Projects/YTT-Submaker/src/lib/components/inspector/Inspector.svelte"' has no default export. (ts)
+[36m    import Timeline from "$lib/components/timeline/Timeline.svelte";
+    import [35mInspector[36m from "$lib/components/inspector/Inspector.svelte";
+    import {[39m
+
+====================================
+[31msvelte-check found 5 errors and 11 warnings in 6 files
+[39m
